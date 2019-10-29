@@ -138,10 +138,7 @@ fn next_ents(r: &mut Raft<MemStorage>, s: &MemStorage) -> Vec<Entry> {
 
 fn do_send_append(raft: &mut Raft<MemStorage>, to: u64) {
     let mut prs = raft.take_prs();
-    {
-        let pr = prs.get_mut(to).unwrap();
-        raft.send_append(to, pr);
-    }
+    raft.send_append(to, &mut prs, false);
     raft.set_prs(prs);
 }
 

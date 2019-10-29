@@ -40,6 +40,7 @@ use crate::eraftpb::{
     Snapshot,
 };
 use crate::errors::{Error, Result};
+use crate::group::{Groups, GroupsConfig};
 use crate::read_only::ReadState;
 use crate::{Raft, SoftState, Status, StatusRef, Storage, INVALID_ID};
 use slog::Logger;
@@ -521,6 +522,14 @@ impl<T: Storage> RawNode<T> {
     #[inline]
     pub fn set_batch_append(&mut self, batch_append: bool) {
         self.raft.set_batch_append(batch_append)
+    }
+
+    /// Update raft groups config for Follower Replication in flight
+    #[inline]
+    pub fn update_groups_config(&mut self, config: GroupsConfig) {
+        let groups = Groups::new(config);
+        // The delegate cache will be removed
+        self.raft.set_groups(groups);
     }
 }
 

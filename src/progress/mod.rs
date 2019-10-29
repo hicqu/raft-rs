@@ -109,7 +109,7 @@ impl Progress {
         }
     }
 
-    fn reset_state(&mut self, state: ProgressState) {
+    pub(crate) fn reset_state(&mut self, state: ProgressState) {
         self.paused = false;
         self.pending_snapshot = 0;
         self.state = state;
