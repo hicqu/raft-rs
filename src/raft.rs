@@ -703,8 +703,6 @@ impl<T: Storage> Raft<T> {
             StateRole::Follower | StateRole::PreCandidate | StateRole::Candidate => {
                 self.tick_election()
             }
-            // TODO: If the peer isn't promotable, it means the peer is demoted or removed as
-            // when it's leader. Shouldn't tick heartbeat in this case.
             StateRole::Leader => self.tick_heartbeat(),
         }
     }
@@ -748,7 +746,8 @@ impl<T: Storage> Raft<T> {
             return has_ready;
         }
 
-        if self.heartbeat_elapsed >= self.heartbeat_timeout {
+        // Only broadcast heartbeats when it's promotable.
+        if self.heartbeat_elapsed >= self.heartbeat_timeout && self.promotable {
             self.heartbeat_elapsed = 0;
             has_ready = true;
             let m = new_message(INVALID_ID, MessageType::MsgBeat, Some(self.id));
@@ -1123,10 +1122,7 @@ impl<T: Storage> Raft<T> {
 
     fn hup(&mut self, transfer_leader: bool) {
         if self.state == StateRole::Leader {
-            debug!(
-                self.logger,
-                "ignoring MsgHup because already leader";
-            );
+            debug!(self.logger, "ignoring MsgHup because already leader");
             return;
         }
 
@@ -1480,12 +1476,10 @@ impl<T: Storage> Raft<T> {
         // These message types do not require any progress for m.From.
         match m.get_msg_type() {
             MessageType::MsgBeat => {
-                // TODO: deal with demoted or removed leader.
                 self.bcast_heartbeat();
                 return Ok(());
             }
             MessageType::MsgCheckQuorum => {
-                // TODO: deal with demoted or removed leader.
                 if !self.check_quorum_active() {
                     warn!(
                         self.logger,
@@ -1545,8 +1539,7 @@ impl<T: Storage> Raft<T> {
                     return Ok(());
                 }
 
-                let self_set = slice::from_ref(&self.id);
-                if !self.prs().has_quorum(&self_set) {
+                if !self.prs().has_quorum(slice::from_ref(&self.id)) {
                     // thinking: use an interally defined context instead of the user given context.
                     // We can express this in terms of the term and index instead of
                     // a user-supplied value.

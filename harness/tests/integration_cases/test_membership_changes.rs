@@ -353,11 +353,11 @@ fn test_remove_leader(transition: ConfChangeTransition) -> Result<()> {
         assert_eq!(index, normal_entry_index);
     }
 
-    // TODO: Can't elect a new leader because the old one can still send heartbeats.
+    // Must elect a new leader because the old leader won't broadcast heartbeats.
     info!(l, "Prompting after leader is removed.");
-    scenario.tick_until_election(&[1, 2, 3]);
+    scenario.tick_until_election(&[1, 2]);
     let leaders: Vec<_> = scenario.peer_leaders().values().cloned().collect();
-    assert_eq!(leaders, vec![1, 1, 1]);
+    assert_eq!(leaders, vec![1, 2, 2]);
 
     Ok(())
 }
@@ -771,11 +771,11 @@ impl Scenario {
 
     // Tick the given peer until it starts a new election.
     fn tick_until_election(&mut self, peers: &[u64]) {
-        let mut ticks = std::usize::MAX;
+        let mut ticks = 0;
         for id in peers {
             let peer = self.peers.get(id).unwrap();
             let t = peer.randomized_election_timeout() + 1 - peer.election_elapsed;
-            ticks = std::cmp::min(ticks, t);
+            ticks = std::cmp::max(ticks, t);
         }
         for _ in 0..=ticks {
             for id in peers {
