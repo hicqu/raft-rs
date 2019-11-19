@@ -14,7 +14,7 @@
 use crate::test_util::*;
 use harness::{Interface, Network};
 use raft::eraftpb::*;
-use raft::group::GroupsConfig;
+use raft::group::{GroupsConfig, FollowerReplicationOption};
 use raft::storage::MemStorage;
 use raft::*;
 use rand::Rng;
@@ -59,9 +59,10 @@ impl Sandbox {
         let mut peers = followers.iter().map(|(id, _)| *id).collect::<Vec<u64>>();
         peers.push(leader);
         let mut c = new_test_config(leader, 10, 1);
-        c.follower_delegate = true;
-        let groups = GroupsConfig::new(group_config.clone());
-        c.groups = groups.clone();
+        c.follower_replication_option = FollowerReplicationOption {
+            follower_delegate: true,
+            groups: GroupsConfig::new(group_config.clone()), 
+        };
         let storage = new_storage(peers.clone(), snapshot_index, last_index - 1);
         let mut leader_node = Interface::new(Raft::new(&c, storage, l).unwrap());
         leader_node.become_candidate();
@@ -73,9 +74,8 @@ impl Sandbox {
             .map(|(id, scenario)| {
                 let storage =
                     new_storage_by_scenario(scenario, peers.clone(), snapshot_index, last_index);
-                let mut c = new_test_config(id, 10, 1);
-                c.follower_delegate = true;
-                c.groups = groups.clone();
+                let mut c = c.clone();
+                c.id = id;
                 let node = Interface::new(Raft::new(&c, storage, l).unwrap());
                 let node_entries = node.raft_log.all_entries();
                 if scenario != FollowerScenario::Snapshot {

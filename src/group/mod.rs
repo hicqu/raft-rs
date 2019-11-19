@@ -23,6 +23,18 @@ use std::collections::hash_map::Iter;
 use std::collections::HashMap;
 use std::iter::FromIterator;
 
+/// The option used for feature [Follower Replication](https://github.com/tikv/rfcs/pull/33/files)
+#[derive(Clone, Debug, Default)]
+pub struct FollowerReplicationOption {
+    /// The leader choose a follower in a raft group as a delegate and ask it to send entries to 
+    /// the rest group members.
+    /// If there is no group configured, no delegate will be picked
+    pub follower_delegate: bool,
+
+    /// The raft group definition. See [`GroupsConfig`](group/struct.GroupsConfig.html) for detail.
+    pub groups: GroupsConfig,
+}
+
 /// Configuration for distribution of raft nodes in groups.
 /// For the inner hashmap, the key is group ID and value is the group members.
 #[derive(Clone, Debug)]

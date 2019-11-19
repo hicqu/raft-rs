@@ -226,7 +226,7 @@ impl<T: Storage> Raft<T> {
         let conf_state = &raft_state.conf_state;
         let voters = &conf_state.voters;
         let learners = &conf_state.learners;
-        let groups = Groups::new(c.groups.clone());
+        let groups = Groups::new(c.follower_replication_option.groups.clone());
         let mut r = Raft {
             id: c.id,
             read_states: Default::default(),
@@ -261,7 +261,7 @@ impl<T: Storage> Raft<T> {
             skip_bcast_commit: c.skip_bcast_commit,
             batch_append: c.batch_append,
             groups,
-            follower_delegate: c.follower_delegate,
+            follower_delegate: c.follower_replication_option.follower_delegate,
             logger,
         };
         for p in voters {

@@ -30,7 +30,7 @@ use super::{
     errors::{Error, Result},
     INVALID_ID,
 };
-use crate::group::GroupsConfig;
+use super::group::FollowerReplicationOption;
 
 /// Config contains the parameters to start a raft.
 #[derive(Clone)]
@@ -100,12 +100,9 @@ pub struct Config {
     /// Batches every append msg if any append msg already exists
     pub batch_append: bool,
 
-    /// The leader delegates the raft log appending to a follower in a raft group.
-    /// If there is no group configured, no delegate will be picked
-    pub follower_delegate: bool,
-
-    /// The raft group definition. See [`GroupsConfig`](group/struct.GroupsConfig.html) for detail.
-    pub groups: GroupsConfig,
+    /// The configuration for the feature Follower Replication.
+    /// See [`FollowerReplicationOption`](group/struct.FollowerReplicationOption.html) for detail.
+    pub follower_replication_option: FollowerReplicationOption,
 }
 
 impl Default for Config {
@@ -125,8 +122,7 @@ impl Default for Config {
             read_only_option: ReadOnlyOption::Safe,
             skip_bcast_commit: false,
             batch_append: false,
-            follower_delegate: false,
-            groups: GroupsConfig::default(),
+            follower_replication_option: FollowerReplicationOption::default(),
         }
     }
 }
