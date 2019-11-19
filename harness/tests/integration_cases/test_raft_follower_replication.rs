@@ -14,7 +14,7 @@
 use crate::test_util::*;
 use harness::{Interface, Network};
 use raft::eraftpb::*;
-use raft::group::{GroupsConfig, FollowerReplicationOption};
+use raft::group::{FollowerReplicationOption, GroupsConfig};
 use raft::storage::MemStorage;
 use raft::*;
 use rand::Rng;
@@ -42,26 +42,60 @@ struct Sandbox {
 }
 
 impl Sandbox {
+    // Create a sandbox for testing
+    //
+    // The relationship between followers in different states:
+    //
+    //  +-----+
+    //     |
+    //     |
+    //     |  Follower::Snapshot
+    //     |
+    //     |
+    //  +-----+ <snapshot_index>
+    //     |
+    //     |
+    //     |
+    //     |  Follower::NeedEntries
+    //     |
+    //     |
+    //     |
+    //  +-----+ <last_index> Follower::UpToDate
+    //
+    // The given `leader` and `followers` should be mutually exclusive
+    //
     pub fn new(
         l: &Logger,
         leader: u64,
         followers: Vec<(u64, FollowerScenario)>,
         group_config: Vec<(u64, Vec<u64>)>,
+        max_leader_group_no_delegate: usize,
         snapshot_index: u64,
         last_index: u64,
     ) -> Self {
         if snapshot_index >= last_index {
-            panic!("Snapshot index should be larger than last index");
+            panic!(
+                "snapshot_index {} should be less than last_index {}",
+                snapshot_index, last_index
+            );
         }
         if last_index < 2 {
-            panic!("Last index should be larger than 1");
+            panic!("last_index {} should be larger than 1", last_index);
         }
-        let mut peers = followers.iter().map(|(id, _)| *id).collect::<Vec<u64>>();
+        let peers = followers.iter().map(|(id, _)| *id).collect::<HashSet<_>>();
+        if peers.contains(&leader) {
+            panic!(
+                "followers {:?} and leader {} should be mutually exclusive",
+                &peers, leader
+            )
+        }
+        let mut peers = peers.into_iter().collect::<Vec<_>>();
         peers.push(leader);
         let mut c = new_test_config(leader, 10, 1);
         c.follower_replication_option = FollowerReplicationOption {
             follower_delegate: true,
-            groups: GroupsConfig::new(group_config.clone()), 
+            groups: GroupsConfig::new(group_config.clone()),
+            max_leader_group_no_delegate,
         };
         let storage = new_storage(peers.clone(), snapshot_index, last_index - 1);
         let mut leader_node = Interface::new(Raft::new(&c, storage, l).unwrap());
@@ -167,12 +201,6 @@ fn new_storage_by_scenario(
     snapshot_index: u64,
     last_index: u64,
 ) -> MemStorage {
-    if snapshot_index >= last_index {
-        panic!("Snapshot index should be larger than last index");
-    }
-    if last_index < 2 {
-        panic!("Last index should be larger than 1");
-    }
     let s = MemStorage::new_with_conf_state((peers.clone(), vec![]));
     match scenario {
         FollowerScenario::UpToDate => {
@@ -247,7 +275,7 @@ fn test_pick_group_delegate() {
         ),
     ];
     for (expected_delegate, input) in tests.drain(..) {
-        let mut sandbox = Sandbox::new(&l, 1, input, group_config.clone(), 5, 10);
+        let mut sandbox = Sandbox::new(&l, 1, input, group_config.clone(), 10, 5, 10);
         sandbox
             .network
             .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
@@ -271,10 +299,11 @@ fn test_pick_group_delegate() {
     }
 }
 
-// test_no_delegate_in_group_containing_leader ensures the leader send msgs directly to the followers
-// if they are in the same group even if the 'follower_delegate' is enabled.
+// test_delegate_in_group_containing_leader ensures that:
+// If the size of leader group is less than or equal to `max_leader_group_no_delegate`, the leader send msgs directly to the followers
+// If the size of leader group is larger than `max_leader_group_no_delegate`, the leader pick a delegate and send `MsgBroadcast`
 #[test]
-fn test_no_delegate_in_group_containing_leader() {
+fn test_delegate_in_group_containing_leader() {
     let l = default_logger();
     let group_config = vec![(1, vec![1, 2, 3, 4])];
     let followers = vec![
@@ -282,15 +311,40 @@ fn test_no_delegate_in_group_containing_leader() {
         (3, FollowerScenario::Snapshot),
         (4, FollowerScenario::UpToDate),
     ];
-    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 10);
-    sandbox
-        .network
-        .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
-        .expect("");
-    let msgs = sandbox.leader_mut().read_messages();
-    assert_eq!(msgs.len(), 3);
-    msgs.iter()
-        .for_each(|m| assert!(m.msg_type != MessageType::MsgBroadcast));
+    let test_cases: Vec<(usize, usize, Box<dyn FnMut(&Message) -> ()>)> = vec![
+        (
+            10,
+            3,
+            Box::new(|m: &Message| assert!(m.msg_type != MessageType::MsgBroadcast)),
+        ),
+        (
+            3,
+            1,
+            Box::new(|m: &Message| {
+                assert!(m.msg_type == MessageType::MsgBroadcast);
+                // Should never pick the leader itself as the delegate
+                assert_ne!(m.to, 1);
+            }),
+        ),
+    ];
+    for (max_leader_group_no_delegate, msgs_len, assertion) in test_cases {
+        let mut sandbox = Sandbox::new(
+            &l,
+            1,
+            followers.clone(),
+            group_config.clone(),
+            max_leader_group_no_delegate,
+            5,
+            10,
+        );
+        sandbox
+            .network
+            .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
+            .expect("");
+        let msgs = sandbox.leader_mut().read_messages();
+        assert_eq!(msgs.len(), msgs_len);
+        msgs.iter().for_each(assertion);
+    }
 }
 
 #[test]
@@ -305,6 +359,7 @@ fn test_broadcast_append_use_delegate() {
             (4, FollowerScenario::NeedEntries(8)),
         ],
         vec![(1, vec![2, 3, 4])],
+        10,
         5,
         10,
     );
@@ -351,7 +406,7 @@ fn test_delegate_reject_broadcast() {
         (3, FollowerScenario::Snapshot),
         (4, FollowerScenario::NeedEntries(12)),
     ];
-    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 20);
+    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 10, 5, 20);
     sandbox.leader_mut().mut_prs().get_mut(2).unwrap().next_idx = 10; // make a conflict next_idx
     sandbox
         .network
@@ -401,8 +456,8 @@ fn test_send_append_use_delegate() {
         (3, FollowerScenario::Snapshot),
         (4, FollowerScenario::NeedEntries(7)),
     ];
-    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 20);
-    // Make a confilct next_idx in peer 2 so that `maybe_decr_to` can work.
+    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 10, 5, 20);
+    // Make a conflict next_idx in peer 2 so that `maybe_decr_to` can work.
     sandbox.leader_mut().mut_prs().get_mut(2).unwrap().next_idx = 21;
     let mut m = new_message(2, 1, MessageType::MsgAppendResponse, 0);
     m.index = 21;

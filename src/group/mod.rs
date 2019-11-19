@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::iter::FromIterator;
 
 /// The option used for feature [Follower Replication](https://github.com/tikv/rfcs/pull/33/files)
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct FollowerReplicationOption {
     /// The leader choose a follower in a raft group as a delegate and ask it to send entries to 
     /// the rest group members.
@@ -33,6 +33,20 @@ pub struct FollowerReplicationOption {
 
     /// The raft group definition. See [`GroupsConfig`](group/struct.GroupsConfig.html) for detail.
     pub groups: GroupsConfig,
+
+    /// The max number of members of a group of which contains leader and the leader never pick a delegate.
+    /// If the group size is larger than this, a delegate will be picked even the leader belongs to this group.
+    pub max_leader_group_no_delegate: usize,
+}
+
+impl Default for FollowerReplicationOption {
+    fn default() -> Self {
+        FollowerReplicationOption {
+            follower_delegate: false,
+            groups: GroupsConfig::default(),
+            max_leader_group_no_delegate: 5,
+        }
+    }
 }
 
 /// Configuration for distribution of raft nodes in groups.
@@ -172,26 +186,6 @@ impl Default for Groups {
             indexes: HashMap::new(),
             delegate_cache: HashMap::new(),
         }
-    }
-}
-
-/// ProxyStrategy defines the message routes of communications between <leader>-<proxy node>-<follower>
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ProxyStrategy {
-    /// No proxy
-    Default,
-
-    /// Randomly choose a proxy for a group every time sending a message
-    Random,
-
-    /// Use a static proxy for a group
-    /// the key is the group ID and the value is the proxy of the group
-    Static(HashMap<u64, u64>),
-}
-
-impl Default for ProxyStrategy {
-    fn default() -> Self {
-        ProxyStrategy::Default
     }
 }
 

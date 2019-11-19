@@ -189,6 +189,8 @@ pub struct Raft<T: Storage> {
     /// Raft groups configuration
     groups: Groups,
     follower_delegate: bool,
+    max_leader_group_no_delegate: usize,
+
     /// The logger for the raft structure.
     pub(crate) logger: slog::Logger,
 }
@@ -262,6 +264,7 @@ impl<T: Storage> Raft<T> {
             batch_append: c.batch_append,
             groups,
             follower_delegate: c.follower_replication_option.follower_delegate,
+            max_leader_group_no_delegate: c.follower_replication_option.max_leader_group_no_delegate,
             logger,
         };
         for p in voters {
@@ -559,7 +562,9 @@ impl<T: Storage> Raft<T> {
     }
 
     /// Sends RPC, with entries to the given peer.
-    /// Iff 'use_delegate', the node will choose a valid delegate to send entries to the given peer.
+    /// The flag `use_delegate` is often true if the feature Follower Replication is enabled ('self.follower_delegate' is true)
+    /// except when the leader want to choose a delegate in its own group. 
+    /// See `max_leader_group_no_delegate` in `FollowerReplicationOption` for detail.
     pub fn send_append(&mut self, to: u64, prs: &mut ProgressSet, use_delegate: bool) {
         if use_delegate && self.follower_delegate {
             let delegate = self.prepare_append_delegate(to, prs);
@@ -643,17 +648,24 @@ impl<T: Storage> Raft<T> {
         let self_id = self.id;
         let mut prs = self.take_prs();
         if self.follower_delegate {
+            let mut delegate = vec![];
             // Choose a peer as the 'delegate' to send
             // entries or snapshot to other peers in a group
             if let Some(members) = self.groups.get_members(self_id) {
-                // Use common send_append for peers in own group
-                members
-                    .iter()
-                    .filter(|id| **id != self_id)
-                    .for_each(|id| self.send_append(*id, &mut prs, false))
+                if members.len() <= self.max_leader_group_no_delegate {
+                    // Use common `send_append` for peers in leader's own group
+                    members
+                        .iter()
+                        .filter(|id| **id != self_id)
+                        .for_each(|id| self.send_append(*id, &mut prs, false))
+                } else {
+                    let gid = self.groups().get_group_id(self_id).unwrap();
+                    if let Some(d) = self.bcast_append_to_group(&mut prs, gid, &members) {
+                        delegate.push(d);
+                    }
+                }
             }
             let mut groups = self.take_groups();
-            let mut delegate = vec![];
             groups
                 .meta_iter()
                 .filter(|(gid, _)| groups.get_group_id(self_id) != Some(**gid))
@@ -2649,7 +2661,7 @@ impl<T: Storage> Raft<T> {
                         let first_index = self.raft_log.first_index();
                         group
                             .iter()
-                            .filter(|member| **member != cached_delegate)
+                            .filter(|member| **member != cached_delegate && **member != self.id)
                             .for_each(|member| {
                                 let pr = prs.get(*member).unwrap();
                                 if pr.pending_request_snapshot != INVALID_INDEX {
@@ -2679,19 +2691,20 @@ impl<T: Storage> Raft<T> {
         let mut prepare_entries = true;
         let mut broadcast_m = Message::default();
         if delegate_id == INVALID_ID {
-            if to_send_entries.is_empty() {
-                if to_send_snapshot.is_empty() {
-                    return delegate;
-                }
-                // All the peers need snapshot
-                prepare_snapshot = true;
-                prepare_entries = false;
-                broadcast_m.set_is_snapshot(true); // the delegate need snapshot too
-                delegate.id = to_send_snapshot[0];
-            } else {
-                // No member is suitable for being the delegate
-                return delegate;
-            }
+            match (to_send_entries.is_empty(), to_send_snapshot.is_empty()) {
+                // If no entries and snapshot need to be sent or no member is suitable for being the delegate,
+                // let the leader do the broadcasting
+                (true, true) | (false, _ ) => return delegate,
+                // All the members need snapshots, pick a delegate ramdonly(Here the first one of `to_send_snapshot`)
+                (true, false) => {
+                    prepare_snapshot = true;
+                    prepare_entries = false;
+                    // TODO: We can just use a flag `is_broadcasting` and remain the `MsgAppend` or `MsgSnapshot`
+                    // in the message's `type` instead of `MsgBroadcast`.
+                    broadcast_m.set_is_snapshot(true); // the delegate need snapshot too
+                    delegate.id = to_send_snapshot[0];
+                },
+            };
         } else {
             if !to_send_snapshot.is_empty() {
                 prepare_snapshot = true;
@@ -2730,6 +2743,7 @@ impl<T: Storage> Raft<T> {
             let ents = broadcast_m.get_entries();
             if !ents.is_empty() {
                 let last = ents.last().unwrap().index;
+                // Update the delegate's Progress as normal
                 pr.update_state(last);
             }
         }
@@ -2842,7 +2856,7 @@ impl<T: Storage> Raft<T> {
     // a snapshot) from the perspective of leader. And the more entries the delegate
     // is able to send to the other group members, the lower pressure the leader has
     // syncing raft logs to peers in typical log replication.
-    // A peer with smaller 'match' is able to receive more un-compacted entries from leader
+    // Also, A peer with smaller 'match' is able to receive more un-compacted entries from leader
     // and then send them to others in same group.
     //
     fn pick_delegate(
@@ -2853,7 +2867,7 @@ impl<T: Storage> Raft<T> {
         let mut to_send_snapshot = vec![];
         let mut to_send_entries = vec![];
         let first_index = self.raft_log.first_index();
-        let (_, delegate_id) = group.iter().fold(
+        let (_, delegate_id) = group.iter().filter(|member| **member != self.id).fold(
             (self.raft_log.last_index() + 1, INVALID_ID),
             |(mut min_matched, mut id), member| {
                 if let Some(pr) = prs.get(*member) {
