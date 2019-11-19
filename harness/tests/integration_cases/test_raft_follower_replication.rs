@@ -14,7 +14,7 @@
 use crate::test_util::*;
 use harness::{Interface, Network};
 use raft::eraftpb::*;
-use raft::group::{GroupsConfig, ProxyStrategy};
+use raft::group::GroupsConfig;
 use raft::storage::MemStorage;
 use raft::*;
 use rand::Rng;
@@ -60,7 +60,7 @@ impl Sandbox {
         peers.push(leader);
         let mut c = new_test_config(leader, 10, 1);
         c.follower_delegate = true;
-        let groups = GroupsConfig::new(group_config.clone(), ProxyStrategy::Default);
+        let groups = GroupsConfig::new(group_config.clone());
         c.groups = groups.clone();
         let storage = new_storage(peers.clone(), snapshot_index, last_index - 1);
         let mut leader_node = Interface::new(Raft::new(&c, storage, l).unwrap());

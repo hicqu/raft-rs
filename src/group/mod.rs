@@ -12,12 +12,10 @@
 // limitations under the License.
 
 //! The module includes the definition of new feature 'raft group' which is used for
-//! **Replication Delegate** and **Message Redirect**.
+//! **Follower Replication**
 //!
-//! # Replication Delegate
-//! TODO
-//! # Message Redirect
-//! TODO
+//! # Follower Replication
+//! See https://github.com/tikv/rfcs/pull/33
 
 use crate::eraftpb::Message;
 use crate::raft;
@@ -27,18 +25,16 @@ use std::iter::FromIterator;
 
 /// Configuration for distribution of raft nodes in groups.
 /// For the inner hashmap, the key is group ID and value is the group members.
-// TODO: Does every group need its own ProxyStrategy ?
 #[derive(Clone, Debug)]
 pub struct GroupsConfig {
-    strategy: ProxyStrategy,
     inner: HashMap<u64, Vec<u64>>,
 }
 
 impl GroupsConfig {
     /// Create a new GroupsConfig
-    pub fn new(config: Vec<(u64, Vec<u64>)>, strategy: ProxyStrategy) -> Self {
+    pub fn new(config: Vec<(u64, Vec<u64>)>) -> Self {
         let inner = HashMap::from_iter(config.into_iter());
-        Self { strategy, inner }
+        Self { inner }
     }
 
     /// Return a iterator with inner group ID - group members pairs
@@ -46,24 +42,11 @@ impl GroupsConfig {
     pub fn iter(&self) -> Iter<'_, u64, Vec<u64>> {
         self.inner.iter()
     }
-
-    #[inline]
-    /// Get the strategy
-    pub fn strategy(&self) -> ProxyStrategy {
-        self.strategy.clone()
-    }
-
-    /// Set the strategy
-    #[inline]
-    pub fn set_strategy(&mut self, strategy: ProxyStrategy) {
-        self.strategy = strategy
-    }
 }
 
 impl Default for GroupsConfig {
     fn default() -> Self {
         Self {
-            strategy: ProxyStrategy::default(),
             inner: HashMap::new(),
         }
     }
@@ -99,12 +82,6 @@ impl Groups {
             indexes,
             ..Default::default()
         }
-    }
-
-    /// Get current group proxy strategy
-    #[inline]
-    pub fn proxy_strategy(&self) -> ProxyStrategy {
-        self.meta.strategy.clone()
     }
 
     /// Return the <group id>-<node id> pairs iterator

@@ -25,19 +25,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{cmp, mem};
-use crate::eraftpb::{Entry, EntryType, HardState, Message, MessageType, Snapshot, Commission};
+use crate::eraftpb::{Commission, Entry, EntryType, HardState, Message, MessageType, Snapshot};
 use rand::{self, Rng};
 use slog::{self, Logger};
+use std::{cmp, mem};
 
 use super::errors::{Error, Result, StorageError};
+use super::group::{GroupDelegate, Groups};
 use super::progress::progress_set::{CandidacyStatus, ProgressSet};
 use super::progress::{Progress, ProgressState};
 use super::raft_log::RaftLog;
 use super::read_only::{ReadOnly, ReadOnlyOption, ReadState};
 use super::storage::Storage;
 use super::Config;
-use super::group::{GroupDelegate, Groups, ProxyStrategy};
 use crate::util;
 use crate::{HashMap, HashSet};
 
@@ -461,25 +461,6 @@ impl<T: Storage> Raft<T> {
                 && m.get_msg_type() != MessageType::MsgReadIndex
             {
                 m.term = self.term;
-            }
-        }
-        // Redirecting msgs to the proxy
-        // TODO: use a set to config the msg types which need to be redirected
-        if m.get_msg_type() != MessageType::MsgBroadcast
-            && m.get_msg_type() != MessageType::MsgBroadcastResp
-        {
-            let proxy = self.pick_redirect_proxy(m.to);
-            if proxy != m.to && !m.to_proxy {
-                m.set_to_proxy(true);
-                m.set_proxy(proxy);
-                debug!(
-                    self.logger,
-                    "Sending msg to {proxy}, from {from} to {to}",
-                    from = self.id,
-                    proxy = proxy,
-                    to = m.to;
-                    "msg" => ?m,
-                );
             }
         }
         self.msgs.push(m);
@@ -2906,33 +2887,5 @@ impl<T: Storage> Raft<T> {
             },
         );
         (delegate_id, to_send_snapshot, to_send_entries)
-    }
-    // Pick a proxy node for redirecting messages
-    fn pick_redirect_proxy(&self, destination: u64) -> u64 {
-        if destination == self.id
-            || (destination == self.leader_id && self.groups.in_same_group(destination, self.id))
-        {
-            return destination;
-        }
-        match self.groups.proxy_strategy() {
-            ProxyStrategy::Default => destination,
-            ProxyStrategy::Random => {
-                self.groups
-                    .get_members(destination)
-                    .map_or(destination, |members| {
-                        if members.len() == 1 {
-                            // Only itself in the group
-                            return destination;
-                        }
-                        members[rand::thread_rng().gen_range(0, members.len())]
-                    })
-            }
-            ProxyStrategy::Static(config) => self
-                .groups
-                .get_group_id(destination)
-                .map_or(destination, |group_id| {
-                    config.get(&group_id).map_or(destination, |proxy| *proxy)
-                }),
-        }
     }
 }
