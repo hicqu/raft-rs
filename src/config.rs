@@ -25,12 +25,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::group::FollowerReplicationOption;
 pub use super::read_only::{ReadOnlyOption, ReadState};
 use super::{
     errors::{Error, Result},
     INVALID_ID,
 };
-use super::group::FollowerReplicationOption;
 
 /// Config contains the parameters to start a raft.
 #[derive(Clone)]

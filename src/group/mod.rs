@@ -26,7 +26,7 @@ use std::iter::FromIterator;
 /// The option used for feature [Follower Replication](https://github.com/tikv/rfcs/pull/33/files)
 #[derive(Clone, Debug)]
 pub struct FollowerReplicationOption {
-    /// The leader choose a follower in a raft group as a delegate and ask it to send entries to 
+    /// The leader choose a follower in a raft group as a delegate and ask it to send entries to
     /// the rest group members.
     /// If there is no group configured, no delegate will be picked
     pub follower_delegate: bool,

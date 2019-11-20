@@ -264,7 +264,9 @@ impl<T: Storage> Raft<T> {
             batch_append: c.batch_append,
             groups,
             follower_delegate: c.follower_replication_option.follower_delegate,
-            max_leader_group_no_delegate: c.follower_replication_option.max_leader_group_no_delegate,
+            max_leader_group_no_delegate: c
+                .follower_replication_option
+                .max_leader_group_no_delegate,
             logger,
         };
         for p in voters {
@@ -563,7 +565,7 @@ impl<T: Storage> Raft<T> {
 
     /// Sends RPC, with entries to the given peer.
     /// The flag `use_delegate` is often true if the feature Follower Replication is enabled ('self.follower_delegate' is true)
-    /// except when the leader want to choose a delegate in its own group. 
+    /// except when the leader want to choose a delegate in its own group.
     /// See `max_leader_group_no_delegate` in `FollowerReplicationOption` for detail.
     pub fn send_append(&mut self, to: u64, prs: &mut ProgressSet, use_delegate: bool) {
         if use_delegate && self.follower_delegate {
@@ -2698,7 +2700,7 @@ impl<T: Storage> Raft<T> {
             match (to_send_entries.is_empty(), to_send_snapshot.is_empty()) {
                 // If no entries and snapshot need to be sent or no member is suitable for being the delegate,
                 // let the leader do the broadcasting
-                (true, true) | (false, _ ) => return delegate,
+                (true, true) | (false, _) => return delegate,
                 // All the members need snapshots, pick a delegate ramdonly(Here the first one of `to_send_snapshot`)
                 (true, false) => {
                     prepare_snapshot = true;
@@ -2707,7 +2709,7 @@ impl<T: Storage> Raft<T> {
                     // in the message's `type` instead of `MsgBroadcast`.
                     broadcast_m.set_is_snapshot(true); // the delegate need snapshot too
                     delegate.id = to_send_snapshot[0];
-                },
+                }
             };
         } else {
             if !to_send_snapshot.is_empty() {
@@ -2768,7 +2770,11 @@ impl<T: Storage> Raft<T> {
             .filter(|(id, _, _)| *id != delegate.id)
         {
             let pr = prs.get_mut(peer).unwrap();
-            assert!(!pr.is_paused(), "the Progress of {} must be un-paused when preparing the corresponding commission", peer);
+            assert!(
+                !pr.is_paused(),
+                "the Progress of {} must be un-paused when preparing the corresponding commission",
+                peer
+            );
             let mut c = Commission::default();
             c.set_msg_type(MessageType::MsgAppend);
             c.set_log_term(term);
