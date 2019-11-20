@@ -1804,10 +1804,10 @@ impl<T: Storage> Raft<T> {
                 send_append = true;
             }
         }
-
         if send_append {
             let from = m.from;
             let mut prs = self.take_prs();
+            dbg!(from);
             self.send_append(from, &mut prs, true);
             self.set_prs(prs);
         }
@@ -2067,6 +2067,7 @@ impl<T: Storage> Raft<T> {
                                 to = commission.get_to(),
                                 index = index + 1;
                             );
+                            bcast_resp.commissions.push(commission);
                             continue;
                         }
                         to_send.set_log_term(commission.get_log_term());
@@ -2572,6 +2573,9 @@ impl<T: Storage> Raft<T> {
                 }
                 None => self.pick_delegate(&group, &prs).0,
             };
+            dbg!(prs.get(4).unwrap());
+            dbg!(delegate_id);
+            dbg!(to);
             if delegate_id != INVALID_ID && delegate_id != to {
                 self.groups.set_delegate(delegate_id);
                 let target_pr = prs.get_mut(to).unwrap();
@@ -2764,9 +2768,7 @@ impl<T: Storage> Raft<T> {
             .filter(|(id, _, _)| *id != delegate.id)
         {
             let pr = prs.get_mut(peer).unwrap();
-            if pr.is_paused() {
-                continue;
-            }
+            assert!(!pr.is_paused(), "the Progress of {} must be un-paused when preparing the corresponding commission", peer);
             let mut c = Commission::default();
             c.set_msg_type(MessageType::MsgAppend);
             c.set_log_term(term);

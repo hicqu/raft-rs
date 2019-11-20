@@ -311,6 +311,7 @@ fn test_delegate_in_group_containing_leader() {
         (3, FollowerScenario::Snapshot),
         (4, FollowerScenario::UpToDate),
     ];
+    #[allow(clippy::type_complexity)]
     let test_cases: Vec<(usize, usize, Box<dyn FnMut(&Message) -> ()>)> = vec![
         (
             10,
@@ -481,4 +482,85 @@ fn test_send_append_use_delegate() {
         sandbox.network.peers.get(&2).unwrap().raft_log.last_index(),
         sandbox.last_index,
     );
+}
+
+// test_delegate_paused_due_to_full_inflight ensures that if a new delegate must be chosen when the old one is paused.
+#[test]
+fn test_dismiss_delegate_due_to_full_inflight() {
+    let l = default_logger();
+    let group_config = vec![(1, vec![2, 3, 4])];
+    let followers = vec![
+        (2, FollowerScenario::NeedEntries(7)),
+        (3, FollowerScenario::UpToDate),
+        (4, FollowerScenario::UpToDate),
+    ];
+    let last_index = 20;
+    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 10, 5, last_index);
+    let max_inflight = sandbox.leader().max_inflight;
+    sandbox
+        .network
+        .dispatch(
+            (0..max_inflight)
+                .map(|_| new_message(1, 1, MessageType::MsgPropose, 1))
+                .collect::<Vec<Message>>(),
+        )
+        .expect("");
+    // All the nodes should be paused except the leader
+    sandbox
+        .leader()
+        .prs()
+        .iter()
+        .filter(|(id, _)| **id != sandbox.leader)
+        .for_each(|(_, pr)| assert!(pr.is_paused()));
+    sandbox.leader_mut().read_messages().iter().for_each(|m| {
+        assert_eq!(m.msg_type, MessageType::MsgBroadcast);
+        assert_eq!(m.to, 2);
+    });
+    assert_eq!(
+        2,
+        sandbox
+            .leader()
+            .groups()
+            .get_delegate(1)
+            .unwrap()
+            .to_owned()
+    );
+    // Assume node 3 and 4 sending response to the leader
+    let mut resp_from3 = new_message(3, 1, MessageType::MsgAppendResponse, 0);
+    resp_from3.index = last_index + max_inflight as u64;
+    let mut resp_from4 = resp_from3.clone();
+    resp_from4.from = 4;
+    resp_from4.index = last_index + max_inflight as u64 - 1;
+    sandbox.network.dispatch(vec![resp_from3]).expect("");
+    // This is a kind of special situation:
+    // After the leader receives the AppendResponse from 3 and handle it, it detects that node 3 need an extra `send_append` because node 3 was
+    // paused before. So the leader tries to pick a delegate for this extra `send_append`. However, as the pre-delegate node 2 and node4 are
+    // both paused, the leader has to send this msg on its own.
+    assert_eq!(
+        2,
+        sandbox
+            .leader()
+            .groups()
+            .get_delegate(1)
+            .unwrap()
+            .to_owned()
+    );
+    let _ = sandbox.leader_mut().read_messages();
+    sandbox.network.dispatch(vec![resp_from4]).expect("");
+    // Now the node 4 has the smallest `match_index`.
+    assert_eq!(
+        4,
+        sandbox
+            .leader()
+            .groups()
+            .get_delegate(1)
+            .unwrap()
+            .to_owned()
+    );
+    let msgs = sandbox.leader_mut().read_messages();
+    assert_eq!(1, msgs.len());
+    msgs.iter().for_each(|m| {
+        assert_eq!(MessageType::MsgBroadcast, m.msg_type);
+        assert_eq!(4, m.to);
+    })
 }
