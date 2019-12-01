@@ -1044,22 +1044,7 @@ impl<T: Storage> Raft<T> {
 
     /// Steps the raft along via a message. This should be called everytime your raft receives a
     /// message from a peer.
-    pub fn step(&mut self, mut m: Message) -> Result<()> {
-        if m.to != INVALID_ID && m.to != self.id {
-            if m.to_proxy && m.proxy == self.id {
-                debug!(
-                    self.logger,
-                    "receive a msg from {from}, use {proxy} as proxy redirect to {to}",
-                    from = m.from,
-                    proxy = m.proxy,
-                    to = m.to
-                );
-                // Receive a message that needs to be redirected
-                m.set_to_proxy(false);
-            }
-            self.msgs.push(m);
-            return Ok(());
-        }
+    pub fn step(&mut self, m: Message) -> Result<()> {
         // Handle the message term, which may result in our stepping down to a follower.
         if m.term == 0 {
             // local message

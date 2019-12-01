@@ -89,13 +89,10 @@ message Message {
     bool reject = 10;
     uint64 reject_hint = 11;
     bytes context = 12;
-    // Tells the transport layer whether this msg needs to be sent to 'proxy'
-    bool to_proxy = 14;
-    uint64 proxy = 15;
     // Only used in `MsgAppend` and `MsgSnapshot`
-    repeated Commission commissions = 16;
+    repeated Commission commissions = 14;
     // Only used in `MsgBroadcast` when the delegate and all the other members need snapshot
-    bool is_snapshot = 17;
+    bool is_snapshot = 15;
 }
 
 message HardState {
