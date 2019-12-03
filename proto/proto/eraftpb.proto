@@ -85,14 +85,17 @@ message Message {
     repeated Entry entries = 7;
     uint64 commit = 8;
     Snapshot snapshot = 9;
-    uint64 request_snapshot = 13;
     bool reject = 10;
     uint64 reject_hint = 11;
     bytes context = 12;
-    // Only used in `MsgAppend` and `MsgSnapshot`
-    repeated Commission commissions = 14;
-    // Only used in `MsgBroadcast` when the delegate and all the other members need snapshot
-    bool is_snapshot = 15;
+    uint64 request_snapshot = 13;
+
+    // The group id of the `from`
+    uint64 group_id = 14;
+    // The targets to send raft logs through the delegate
+    repeated uint64 bcast_targets = 16;
+    // Whether the follower receives a MsgAppend/MsgSnapshot from a delegate
+    uint64 from_delegate = 17;
 }
 
 message HardState {

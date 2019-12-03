@@ -38,8 +38,11 @@ pub enum ProgressState {
     Probe,
     /// Whether it's replicating.
     Replicate,
-    /// Whethers it's a snapshot.
+    /// Whether it's a snapshot.
     Snapshot,
+    /// Whether the peer is delegated.
+    /// A `Delegated` peer's Inflights is always empty and the Progress is never paused.
+    Delegated,
 }
 
 impl Default for ProgressState {
@@ -157,6 +160,14 @@ impl Progress {
         self.pending_snapshot = snapshot_idx;
     }
 
+    /// Changes the progress to a Delegated.
+    #[inline]
+    pub fn become_delegated(&mut self) {
+        if self.state != ProgressState::Delegated {
+            self.reset_state(ProgressState::Delegated);
+        }
+    }
+
     /// Sets the snapshot to failure.
     #[inline]
     pub fn snapshot_failure(&mut self) {
@@ -196,7 +207,7 @@ impl Progress {
     /// Otherwise it decreases the progress next index to min(rejected, last)
     /// and returns true.
     pub fn maybe_decr_to(&mut self, rejected: u64, last: u64, request_snapshot: u64) -> bool {
-        if self.state == ProgressState::Replicate {
+        if self.state == ProgressState::Replicate || self.state == ProgressState::Delegated {
             // the rejection must be stale if the progress has matched and "rejected"
             // is smaller than "match".
             // Or rejected equals to matched and request_snapshot is the INVALID_INDEX.
@@ -215,6 +226,7 @@ impl Progress {
 
         // The rejection must be stale if "rejected" does not match next - 1.
         // Do not consider it stale if it is a request snapshot message.
+        // This should only happens when the state is ProgressState::Probe
         if (self.next_idx == 0 || self.next_idx - 1 != rejected)
             && request_snapshot == INVALID_INDEX
         {
@@ -242,6 +254,7 @@ impl Progress {
             ProgressState::Probe => self.paused,
             ProgressState::Replicate => self.ins.full(),
             ProgressState::Snapshot => true,
+            ProgressState::Delegated => false,
         }
     }
 
@@ -269,6 +282,13 @@ impl Progress {
                 "updating progress state in unhandled state {:?}",
                 self.state
             ),
+            // NOTICE: When the leader resume origin Log Replication of a `Delegated` peer, there might
+            // be still some MsgAppendResp on the fly. But it's safe to just `add(last)` as `free_to` will ignore the idx out of the window.
+            ProgressState::Delegated => {
+                self.become_replicate();
+                self.optimistic_update(last);
+                self.ins.add(last);
+            }
         }
     }
 }

@@ -250,6 +250,12 @@ impl ProgressSet {
             .filter(move |(k, _)| ids.contains(k))
     }
 
+    /// Returns the ids of all the peers (voters + learners)
+    #[inline]
+    pub fn peer_ids(&self) -> Vec<u64> {
+        self.progress.keys().copied().collect::<Vec<u64>>()
+    }
+
     /// Returns the ids of all known voters.
     ///
     /// **Note:** Do not use this for majority/quorum calculation. The Raft node may be

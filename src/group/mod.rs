@@ -17,8 +17,6 @@
 //! # Follower Replication
 //! See https://github.com/tikv/rfcs/pull/33
 
-use crate::eraftpb::Message;
-use crate::raft;
 use std::collections::hash_map::Iter;
 use std::collections::HashMap;
 use std::iter::FromIterator;
@@ -185,33 +183,6 @@ impl Default for Groups {
             meta: Default::default(),
             indexes: HashMap::new(),
             delegate_cache: HashMap::new(),
-        }
-    }
-}
-
-/// A helper struct for group delegate.
-/// A group delegate can broadcast MsgAppend & MsgSnapshot to group members
-#[derive(Debug, Clone)]
-pub struct GroupDelegate {
-    /// The target delegate
-    pub id: u64,
-    /// The message sending to the delegate
-    pub msg: Message,
-}
-
-impl GroupDelegate {
-    /// Wheter the delegate id is valid
-    #[inline]
-    pub fn is_valid(&self) -> bool {
-        self.id != raft::INVALID_ID
-    }
-}
-
-impl Default for GroupDelegate {
-    fn default() -> Self {
-        Self {
-            id: raft::INVALID_ID,
-            msg: Message::default(),
         }
     }
 }
