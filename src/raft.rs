@@ -573,12 +573,13 @@ impl<T: Storage> Raft<T> {
     }
 
     /// Sends RPC, with entries to the given peer.
+    /// This can be called by the leader or a delegate. If the delegate call this, the field `to` 
+    /// of produced message should be set to the leader id.
     pub fn send_append(&mut self, to: u64, prs: &mut ProgressSet) {
         if self.use_delegate(to) {
             if let Some(gid) = self.groups.get_group_id(to) {
                 match self.delegated_msgs.get_mut(&gid) {
                     Some(m) => {
-                        // The leader doesn't control the transmission flow of the follower which is not a group delegate.
                         m.bcast_targets.push(to);
                         if let Some(pr) = prs.get_mut(to) {
                             // This just clean all the Inflights though there could be some MsgAppendResp on the way. And from
@@ -596,13 +597,14 @@ impl<T: Storage> Raft<T> {
                         if delegate != INVALID_ID {
                             if let Some(pr) = prs.get_mut(delegate) {
                                 if let Some(mut m) =
-                                    self.prepare_replicate_message_for_peer(delegate, pr)
+                                    self.prepare_replicate_message_for_peer(delegate, self.id, pr)
                                 {
                                     if to != delegate {
                                         // add into the to-be-sent targets
                                         m.bcast_targets.push(to);
                                     }
                                     self.delegated_msgs.insert(gid, m);
+                                    self.groups.set_delegate(delegate);
                                     return;
                                 }
                                 // The the delegate progress is paused, use the normal way
@@ -614,7 +616,13 @@ impl<T: Storage> Raft<T> {
         }
         // Send Append RPC using no delegate to the given peer.
         if let Some(pr) = prs.get_mut(to) {
-            if let Some(m) = self.prepare_replicate_message_for_peer(to, pr) {
+            let from = if self.is_leader() {
+                INVALID_ID
+            } else {
+                // Is this safe?
+                self.leader_id
+            };
+            if let Some(m) = self.prepare_replicate_message_for_peer(to, from, pr) {
                 self.send(m);
             }
         }
@@ -627,6 +635,7 @@ impl<T: Storage> Raft<T> {
     //      - Not `recent_active`
     fn prepare_replicate_message_for_peer(
         &mut self,
+        from: u64,
         to: u64,
         pr: &mut Progress,
     ) -> Option<Message> {
@@ -641,6 +650,7 @@ impl<T: Storage> Raft<T> {
         }
         let mut m = Message::default();
         m.to = to;
+        m.from = from;
         if pr.pending_request_snapshot != INVALID_INDEX {
             // Check pending request snapshot first to avoid unnecessary loading entries.
             if !self.prepare_send_snapshot(&mut m, pr, to) {
@@ -1737,9 +1747,16 @@ impl<T: Storage> Raft<T> {
         }
         if send_append {
             let from = m.from;
-            let mut prs = self.take_prs();
-            self.send_append(from, &mut prs);
-            self.set_prs(prs);
+            if m.bcast_targets.is_empty() {
+                let mut prs = self.take_prs();
+                self.send_append(from, &mut prs);
+                self.set_prs(prs);
+            } else {
+                // Get a rejection from a delegate so re-delegate the `bcast_targets`
+                // TODO: As the group config is volitale, the received `bcast_targets` might be stale
+                // Do we need to use the newest group config here?
+                self.bcast_append(Some(&m.bcast_targets));
+            }
         }
         if !more_to_send.is_empty() {
             for to_send in more_to_send.drain(..) {
@@ -1772,11 +1789,6 @@ impl<T: Storage> Raft<T> {
                 self.become_follower(m.term, m.from);
                 self.handle_heartbeat(m);
             }
-            // MessageType::MsgSnapshot => {
-            //     debug_assert_eq!(self.term, m.term);
-            //     self.become_follower(m.term, m.from);
-            //     self.handle_snapshot(m);
-            // }
             MessageType::MsgRequestPreVoteResponse | MessageType::MsgRequestVoteResponse => {
                 // Only handle vote responses corresponding to our candidacy (while in
                 // state Candidate, we may get stale MsgPreVoteResp messages in this term from
@@ -1920,7 +1932,8 @@ impl<T: Storage> Raft<T> {
         Ok(())
     }
 
-    fn handle_replication(&mut self, mut m: Message) {
+    /// Receive a replication message (MsgAppend or MsgSnapshot) and handle it
+    pub fn handle_replication(&mut self, mut m: Message) {
         let response = match m.msg_type {
             MessageType::MsgAppend => self.handle_append_entries(&m),
             MessageType::MsgSnapshot => {
@@ -1947,6 +1960,9 @@ impl<T: Storage> Raft<T> {
             // Send back to delegate for flow control and updating the Progress
             self.send(to_delegate);
         } else {
+            if response.reject && !targets.is_empty() {
+                m.set_bcast_targets(targets);
+            }
             self.send(response);
         }
     }
@@ -1982,9 +1998,8 @@ impl<T: Storage> Raft<T> {
         Err(Error::RequestSnapshotDropped)
     }
 
-    // TODO: revoke pub when there is a better way to test.
     /// For a given message, append the entries to the log.
-    pub fn handle_append_entries(&mut self, m: &Message) -> Message {
+    fn handle_append_entries(&mut self, m: &Message) -> Message {
         if self.pending_request_snapshot != INVALID_INDEX {
             return self.prepare_request_snapshot(self.leader_id);
         }
