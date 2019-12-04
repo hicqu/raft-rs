@@ -1962,7 +1962,6 @@ impl<T: Storage> Raft<T> {
                 // the delegate rejects appending, send back targets to the leader
                 // TODO: Does the leader still need to tell the delegate the group members?
                 response.set_bcast_targets(targets);
-                self.send(response);
             } else {
                 self.bcast_append(Some(&targets));
             }
@@ -1973,10 +1972,10 @@ impl<T: Storage> Raft<T> {
                 let to_leader = response.clone();
                 self.send(to_leader);
             }
-            response.to = m.from_delegate;
             // Send back to delegate for flow control and updating the Progress
-            self.send(response);
-        }
+            response.to = m.from_delegate;
+        }  
+        self.send(response);
     }
 
     /// Request a snapshot from a leader.
