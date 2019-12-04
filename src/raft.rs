@@ -597,7 +597,7 @@ impl<T: Storage> Raft<T> {
                         if delegate != INVALID_ID {
                             if let Some(pr) = prs.get_mut(delegate) {
                                 if let Some(mut m) =
-                                    self.prepare_replicate_message_for_peer(delegate, self.id, pr)
+                                    self.prepare_replicate_message_for_peer(self.id, delegate, pr)
                                 {
                                     if to != delegate {
                                         // add into the to-be-sent targets
@@ -633,7 +633,7 @@ impl<T: Storage> Raft<T> {
                 // Is this safe?
                 self.leader_id
             };
-            if let Some(mut m) = self.prepare_replicate_message_for_peer(to, from, pr) {
+            if let Some(mut m) = self.prepare_replicate_message_for_peer(from, to, pr) {
                 if self.is_leader() {
                     self.send(m);
                 } else {
@@ -2439,28 +2439,17 @@ impl<T: Storage> Raft<T> {
     // The delegate must satisfy conditions below:
     // 1. Must be 'recent_active'
     // 2. The progress state should be 'Replicate' but not 'paused'
-    // 3. The progress has smallest 'match'
+    // 3. The progress has biggest 'match'
     // 4. Not requiring a snapshot
     //
     // Especially if all the members in a group needs snapshot, choose the delegate randomly.
-    //
-    // Why using the peer with smallest 'match' as a delegate ?
-    //
-    // Our target is to reduce the workload in the leader which means the group
-    // delegate should be able to send entries as much as possible. Therefore,
-    // the delegate must not be requiring a snapshot (either or requesting
-    // a snapshot) from the perspective of leader. And the more entries the delegate
-    // is able to send to the other group members, the lower pressure the leader has
-    // syncing raft logs to peers in typical log replication.
-    // Also, A peer with smaller 'match' is able to receive more un-compacted entries from leader
-    // and then send them to others in same group.
     //
     fn pick_delegate(&self, group: &[u64], prs: &ProgressSet) -> u64 {
         let mut to_send_snapshot = vec![];
         let first_index = self.raft_log.first_index();
         let (_, delegate_id) = group.iter().filter(|member| **member != self.id).fold(
-            (self.raft_log.last_index() + 1, INVALID_ID),
-            |(mut min_matched, mut id), member| {
+            (INVALID_INDEX, INVALID_ID),
+            |(mut max_matched, mut id), member| {
                 if let Some(pr) = prs.get(*member) {
                     // `pr.pending_request_snapshot` can be passed as the delegate can send snapshots
                     // to other members now
@@ -2468,23 +2457,24 @@ impl<T: Storage> Raft<T> {
                         let term = self.raft_log.term(pr.next_idx - 1);
                         if term.is_err() || pr.next_idx < first_index {
                             to_send_snapshot.push(*member);
-                        } else if pr.matched < min_matched
+                        } else if pr.matched > max_matched
                             && pr.recent_active
                             && pr.state == ProgressState::Replicate
                         {
-                            min_matched = pr.matched;
+                            max_matched = pr.matched;
                             id = *member;
                         }
                     }
                 }
-                (min_matched, id)
+                (max_matched, id)
             },
         );
         if delegate_id == INVALID_ID && !to_send_snapshot.is_empty() {
             // All the members need snapshot, choose the delegate randomly. It's safe since they're all unpaused.
             to_send_snapshot[0]
         } else {
-            // In the situation where every member is paused(or not recent_active) but not requring a snapshot, we get a invalid delegate. Otherwise, we must have gotten a valid delegate.
+            // In the situation where every member is paused(or not recent_active) but not requring a snapshot, we get a invalid delegate. 
+            // Otherwise, the `delegate_id` must be valid.
             delegate_id
         }
     }
