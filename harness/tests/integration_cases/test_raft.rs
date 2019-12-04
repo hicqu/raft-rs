@@ -138,7 +138,7 @@ fn next_ents(r: &mut Raft<MemStorage>, s: &MemStorage) -> Vec<Entry> {
 
 fn do_send_append(raft: &mut Raft<MemStorage>, to: u64) {
     let mut prs = raft.take_prs();
-    raft.send_append(to, &mut prs, false);
+    raft.send_append(to, &mut prs);
     raft.set_prs(prs);
 }
 
@@ -1204,7 +1204,7 @@ fn test_handle_msg_append() {
         );
 
         sm.become_follower(2, INVALID_ID);
-        sm.handle_append_entries(&m);
+        sm.handle_replication(m);
         if sm.raft_log.last_index() != w_index {
             panic!(
                 "#{}: last_index = {}, want {}",
@@ -1371,7 +1371,7 @@ fn test_msg_append_response_wait_reset() {
 
     // The new leader has just emitted a new Term 4 entry; consume those messages
     // from the outgoing queue.
-    sm.bcast_append();
+    sm.bcast_append(None);
     sm.read_messages();
 
     // Node 2 acks the first entry, making it committed.

@@ -34,7 +34,7 @@ use slog::Logger;
 
 pub fn commit_noop_entry(r: &mut Interface, s: &MemStorage) {
     assert_eq!(r.state, StateRole::Leader);
-    r.bcast_append();
+    r.bcast_append(None);
     // simulate the response of MsgAppend
     let msgs = r.read_messages();
     for m in msgs {

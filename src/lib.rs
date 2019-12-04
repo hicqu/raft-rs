@@ -540,7 +540,7 @@ pub mod prelude {
 
     pub use crate::read_only::{ReadOnlyOption, ReadState};
 
-    pub use crate::group::{FollowerReplicationOption, GroupsConfig};
+    pub use crate::group::GroupsConfig;
 }
 
 /// The default logger we fall back to when passed `None` in external facing constructors.

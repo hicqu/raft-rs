@@ -25,11 +25,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::group::FollowerReplicationOption;
 pub use super::read_only::{ReadOnlyOption, ReadState};
 use super::{
     errors::{Error, Result},
-    INVALID_ID,
+    INVALID_ID, INVALID_INDEX,
 };
 
 /// Config contains the parameters to start a raft.
@@ -100,19 +99,18 @@ pub struct Config {
     /// Batches every append msg if any append msg already exists
     pub batch_append: bool,
 
-    /// The configuration for the feature Follower Replication.
-    /// See [`FollowerReplicationOption`](group/struct.FollowerReplicationOption.html) for detail.
-    pub follower_replication_option: FollowerReplicationOption,
+    /// The Group ID of this node in the feature Follower Replication.
+    pub group_id: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
         const HEARTBEAT_TICK: usize = 2;
         Self {
-            id: 0,
+            id: INVALID_ID,
             election_tick: HEARTBEAT_TICK * 10,
             heartbeat_tick: HEARTBEAT_TICK,
-            applied: 0,
+            applied: INVALID_INDEX,
             max_size_per_msg: 0,
             max_inflight_msgs: 256,
             check_quorum: false,
@@ -122,7 +120,7 @@ impl Default for Config {
             read_only_option: ReadOnlyOption::Safe,
             skip_bcast_commit: false,
             batch_append: false,
-            follower_replication_option: FollowerReplicationOption::default(),
+            group_id: INVALID_ID,
         }
     }
 }

@@ -14,7 +14,7 @@
 use crate::test_util::*;
 use harness::{Interface, Network};
 use raft::eraftpb::*;
-use raft::group::{FollowerReplicationOption, GroupsConfig};
+use raft::group::{Groups, GroupsConfig};
 use raft::storage::MemStorage;
 use raft::*;
 use rand::Rng;
@@ -62,14 +62,14 @@ impl Sandbox {
     //     |
     //  +-----+ <last_index> Follower::UpToDate
     //
-    // The given `leader` and `followers` should be mutually exclusive
+    // The given `leader` and `followers` should be mutually exclusive.
+    // The ProgressSet in generated followers are uninitialized
     //
     pub fn new(
         l: &Logger,
         leader: u64,
         followers: Vec<(u64, FollowerScenario)>,
         group_config: Vec<(u64, Vec<u64>)>,
-        max_leader_group_no_delegate: usize,
         snapshot_index: u64,
         last_index: u64,
     ) -> Self {
@@ -91,14 +91,10 @@ impl Sandbox {
         }
         let mut peers = peers.into_iter().collect::<Vec<_>>();
         peers.push(leader);
-        let mut c = new_test_config(leader, 10, 1);
-        c.follower_replication_option = FollowerReplicationOption {
-            follower_delegate: true,
-            groups: GroupsConfig::new(group_config.clone()),
-            max_leader_group_no_delegate,
-        };
+        let c = new_test_config(leader, 10, 1);
         let storage = new_storage(peers.clone(), snapshot_index, last_index - 1);
         let mut leader_node = Interface::new(Raft::new(&c, storage, l).unwrap());
+        leader_node.set_groups(Groups::new(GroupsConfig::new(group_config)));
         leader_node.become_candidate();
         leader_node.become_leader();
         let entries = leader_node.raft_log.all_entries();
@@ -247,10 +243,11 @@ fn new_storage_by_scenario(
 #[test]
 fn test_pick_group_delegate() {
     let l = default_logger();
-    let group_config = vec![(1, vec![2, 3, 4])];
-    let mut tests = vec![
+    let group_config = vec![(2, vec![1]), (1, vec![2, 3, 4])];
+    let tests = vec![
         (
-            vec![2],
+            vec![4],
+            MessageType::MsgAppend,
             vec![
                 (2, FollowerScenario::NeedEntries(6)),
                 (3, FollowerScenario::NeedEntries(7)),
@@ -259,6 +256,7 @@ fn test_pick_group_delegate() {
         ),
         (
             vec![2, 3, 4],
+            MessageType::MsgSnapshot,
             vec![
                 (2, FollowerScenario::Snapshot),
                 (3, FollowerScenario::Snapshot),
@@ -267,30 +265,36 @@ fn test_pick_group_delegate() {
         ),
         (
             vec![2],
+            MessageType::MsgAppend,
             vec![
-                (2, FollowerScenario::NeedEntries(7)),
+                (2, FollowerScenario::UpToDate),
                 (3, FollowerScenario::Snapshot),
-                (4, FollowerScenario::UpToDate),
+                (4, FollowerScenario::NeedEntries(7)),
             ],
         ),
     ];
-    for (expected_delegate, input) in tests.drain(..) {
-        let mut sandbox = Sandbox::new(&l, 1, input, group_config.clone(), 10, 5, 10);
+    for (expected_delegate, expected_msg_type, input) in tests {
+        let mut sandbox = Sandbox::new(&l, 1, input, group_config.clone(), 5, 10);
         sandbox
             .network
             .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
             .expect("");
         let mut msgs = sandbox.leader_mut().read_messages();
-        assert_eq!(1, msgs.len(), "Should only send a MsgBroadcast msg");
+        assert_eq!(1, msgs.len(), "Should only send one msg");
         let m = msgs.pop().unwrap();
         assert_eq!(
-            m.msg_type,
-            MessageType::MsgBroadcast,
-            "The sent msg type should be MsgBroadcast"
+            m.msg_type, expected_msg_type,
+            "The sent msg type should be {:?} but got {:?}",
+            expected_delegate, m.msg_type,
         );
         let delegate = m.to;
         let delegate_set: HashSet<u64> = HashSet::from_iter(expected_delegate);
-        assert!(delegate_set.contains(&delegate));
+        assert!(
+            delegate_set.contains(&delegate),
+            "set {:?}, delegate {}",
+            &delegate_set,
+            delegate
+        );
         assert_eq!(
             sandbox.leader().groups().get_delegate(1),
             Some(delegate),
@@ -299,9 +303,7 @@ fn test_pick_group_delegate() {
     }
 }
 
-// test_delegate_in_group_containing_leader ensures that:
-// If the size of leader group is less than or equal to `max_leader_group_no_delegate`, the leader send msgs directly to the followers
-// If the size of leader group is larger than `max_leader_group_no_delegate`, the leader pick a delegate and send `MsgBroadcast`
+// test_delegate_in_group_containing_leader ensures that the leader send msgs directly to the followers in the same group
 #[test]
 fn test_delegate_in_group_containing_leader() {
     let l = default_logger();
@@ -311,41 +313,21 @@ fn test_delegate_in_group_containing_leader() {
         (3, FollowerScenario::Snapshot),
         (4, FollowerScenario::UpToDate),
     ];
-    #[allow(clippy::type_complexity)]
-    let test_cases: Vec<(usize, usize, Box<dyn FnMut(&Message) -> ()>)> = vec![
-        (
-            10,
-            3,
-            Box::new(|m: &Message| assert!(m.msg_type != MessageType::MsgBroadcast)),
-        ),
-        (
-            3,
-            1,
-            Box::new(|m: &Message| {
-                assert!(m.msg_type == MessageType::MsgBroadcast);
-                // Should never pick the leader itself as the delegate
-                assert_ne!(m.to, 1);
-            }),
-        ),
-    ];
-    for (max_leader_group_no_delegate, msgs_len, assertion) in test_cases {
-        let mut sandbox = Sandbox::new(
-            &l,
-            1,
-            followers.clone(),
-            group_config.clone(),
-            max_leader_group_no_delegate,
-            5,
-            10,
-        );
-        sandbox
-            .network
-            .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
-            .expect("");
-        let msgs = sandbox.leader_mut().read_messages();
-        assert_eq!(msgs.len(), msgs_len);
-        msgs.iter().for_each(assertion);
-    }
+    let mut sandbox = Sandbox::new(
+        &l,
+        1,
+        followers.clone(),
+        group_config.clone(),
+        5,
+        10,
+    );
+    sandbox
+        .network
+        .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
+        .expect("");
+    let msgs = sandbox.leader_mut().read_messages();
+    assert_eq!(msgs.len(), 3);
+    msgs.iter().for_each(|m| assert!(m.bcast_targets.is_empty()));
 }
 
 #[test]
@@ -355,12 +337,11 @@ fn test_broadcast_append_use_delegate() {
         &l,
         1,
         vec![
-            (2, FollowerScenario::NeedEntries(6)),
+            (2, FollowerScenario::NeedEntries(8)),
             (3, FollowerScenario::NeedEntries(7)),
-            (4, FollowerScenario::NeedEntries(8)),
+            (4, FollowerScenario::NeedEntries(6)),
         ],
-        vec![(1, vec![2, 3, 4])],
-        10,
+        vec![(2, vec![1]), (1, vec![2, 3, 4])],
         5,
         10,
     );
@@ -371,7 +352,9 @@ fn test_broadcast_append_use_delegate() {
     let mut msgs = sandbox.leader_mut().read_messages();
     assert_eq!(1, msgs.len());
     let m = msgs.pop().unwrap();
-    assert_eq!(m.msg_type, MessageType::MsgBroadcast);
+    assert_eq!(m.msg_type, MessageType::MsgAppend);
+    assert!(m.bcast_targets.contains(&3));
+    assert!(m.bcast_targets.contains(&4));
     let delegate = m.to;
     assert_eq!(delegate, 2);
     sandbox.network.dispatch(vec![m]).expect("");
@@ -379,7 +362,7 @@ fn test_broadcast_append_use_delegate() {
     let mut msgs = sandbox.get_mut(delegate).read_messages();
     assert_eq!(3, msgs.len());
     let bcast_resp = msgs.pop().unwrap();
-    assert_eq!(bcast_resp.msg_type, MessageType::MsgBroadcastResp);
+    assert_eq!(bcast_resp.msg_type, MessageType::MsgAppendResponse);
     let to_send_ids = sandbox
         .followers
         .iter()
@@ -388,6 +371,11 @@ fn test_broadcast_append_use_delegate() {
         .collect::<Vec<u64>>();
     let set: HashSet<u64> = HashSet::from_iter(to_send_ids);
     msgs.iter().for_each(|m| {
+        assert_eq!(
+            m.from, 1,
+            "the delegated message must looks like coming from leader"
+        );
+        assert_eq!(m.from_delegate, 2, "'from_delegate' must be set");
         assert_eq!(m.msg_type, MessageType::MsgAppend);
         assert!(set.contains(&m.to));
     });
@@ -401,13 +389,13 @@ fn test_broadcast_append_use_delegate() {
 #[test]
 fn test_delegate_reject_broadcast() {
     let l = default_logger();
-    let group_config = vec![(1, vec![2, 3, 4])];
+    let group_config = vec![(2, vec![1]), (1, vec![2, 3, 4])];
     let followers = vec![
         (2, FollowerScenario::NeedEntries(7)),
         (3, FollowerScenario::Snapshot),
         (4, FollowerScenario::NeedEntries(12)),
     ];
-    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 10, 5, 20);
+    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 20);
     sandbox.leader_mut().mut_prs().get_mut(2).unwrap().next_idx = 10; // make a conflict next_idx
     sandbox
         .network
@@ -417,7 +405,7 @@ fn test_delegate_reject_broadcast() {
     let m = msgs.pop().unwrap();
     assert_eq!(2, m.to);
     let pr_peer4 = sandbox.leader().prs().get(4).unwrap();
-    assert_eq!(ProgressState::Replicate, pr_peer4.state);
+    assert_eq!(ProgressState::Delegated, pr_peer4.state);
     assert_eq!(
         sandbox.last_index + 2,
         pr_peer4.next_idx,
@@ -432,7 +420,7 @@ fn test_delegate_reject_broadcast() {
     assert_eq!(1, m.to);
     assert_eq!(
         2,
-        m.get_commissions().len(),
+        m.get_bcast_targets().len(),
         "If a delegate rejects broadcasting, it should send back all the commissions to the leader"
     );
     sandbox.network.dispatch(vec![m]).expect("");
@@ -442,7 +430,7 @@ fn test_delegate_reject_broadcast() {
     assert_eq!(1, msgs.len());
     let m = msgs.pop().unwrap();
     assert_eq!(4, m.to);
-    assert_eq!(2, m.get_commissions().len());
+    assert_eq!(2, m.get_bcast_targets().len());
     sandbox.network.send(vec![m]);
     sandbox.assert_final_state();
 }
@@ -451,13 +439,13 @@ fn test_delegate_reject_broadcast() {
 #[test]
 fn test_send_append_use_delegate() {
     let l = default_logger();
-    let group_config = vec![(1, vec![2, 3, 4])];
+    let group_config = vec![(2, vec![1]), (1, vec![2, 3, 4])];
     let followers = vec![
         (2, FollowerScenario::NeedEntries(10)),
         (3, FollowerScenario::Snapshot),
         (4, FollowerScenario::NeedEntries(7)),
     ];
-    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 10, 5, 20);
+    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 20);
     // Make a conflict next_idx in peer 2 so that `maybe_decr_to` can work.
     sandbox.leader_mut().mut_prs().get_mut(2).unwrap().next_idx = 21;
     let mut m = new_message(2, 1, MessageType::MsgAppendResponse, 0);
@@ -472,11 +460,9 @@ fn test_send_append_use_delegate() {
     let m = &msgs[0];
     assert_eq!(m.msg_type, MessageType::MsgBroadcast);
     assert_eq!(4, m.to);
-    assert_eq!(1, m.get_commissions().len());
-    let commissions = m.get_commissions();
-    let c = &commissions[0];
-    assert_eq!(c.msg_type, MessageType::MsgAppend);
-    assert_eq!(2, c.to);
+    assert_eq!(2, m.get_bcast_targets().len());
+    let targets = m.get_bcast_targets();
+    assert_eq!(vec![2, 3], targets);
     sandbox.network.send(msgs);
     assert_eq!(
         sandbox.network.peers.get(&2).unwrap().raft_log.last_index(),
@@ -488,14 +474,14 @@ fn test_send_append_use_delegate() {
 #[test]
 fn test_dismiss_delegate_due_to_full_inflight() {
     let l = default_logger();
-    let group_config = vec![(1, vec![2, 3, 4])];
+    let group_config = vec![(2, vec![1]), (1, vec![2, 3, 4])];
     let followers = vec![
         (2, FollowerScenario::NeedEntries(7)),
         (3, FollowerScenario::UpToDate),
         (4, FollowerScenario::UpToDate),
     ];
     let last_index = 20;
-    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 10, 5, last_index);
+    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, last_index);
     let max_inflight = sandbox.leader().max_inflight;
     sandbox
         .network
@@ -513,7 +499,7 @@ fn test_dismiss_delegate_due_to_full_inflight() {
         .filter(|(id, _)| **id != sandbox.leader)
         .for_each(|(_, pr)| assert!(pr.is_paused()));
     sandbox.leader_mut().read_messages().iter().for_each(|m| {
-        assert_eq!(m.msg_type, MessageType::MsgBroadcast);
+        assert_eq!(m.msg_type, MessageType::MsgAppend);
         assert_eq!(m.to, 2);
     });
     assert_eq!(

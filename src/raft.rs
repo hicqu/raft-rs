@@ -191,8 +191,7 @@ pub struct Raft<T: Storage> {
 
     /// Raft groups configuration
     groups: Groups,
-    follower_delegate: bool,
-    max_leader_group_no_delegate: usize,
+    group_id: u64,
 
     /// The logger for the raft structure.
     pub(crate) logger: slog::Logger,
@@ -231,7 +230,6 @@ impl<T: Storage> Raft<T> {
         let conf_state = &raft_state.conf_state;
         let voters = &conf_state.voters;
         let learners = &conf_state.learners;
-        let groups = Groups::new(c.follower_replication_option.groups.clone());
         let mut r = Raft {
             id: c.id,
             read_states: Default::default(),
@@ -266,11 +264,8 @@ impl<T: Storage> Raft<T> {
             max_election_timeout: c.max_election_tick(),
             skip_bcast_commit: c.skip_bcast_commit,
             batch_append: c.batch_append,
-            groups,
-            follower_delegate: c.follower_replication_option.follower_delegate,
-            max_leader_group_no_delegate: c
-                .follower_replication_option
-                .max_leader_group_no_delegate,
+            groups: Default::default(),
+            group_id: c.group_id,
             logger,
         };
         for p in voters {
@@ -553,13 +548,9 @@ impl<T: Storage> Raft<T> {
 
     // Whether the given peer could use Follower Replication
     fn use_delegate(&self, to: u64) -> bool {
-        if self.follower_delegate && self.is_leader() {
+        if self.is_follower_replication_enabled() && self.is_leader() {
             if self.groups.in_same_group(self.id, to) {
-                // If the target is in the leader group, it depends on `max_leader_group_no_delegate`
-                self.groups
-                    .get_members(to)
-                    .map_or(0, |members| members.len())
-                    > self.max_leader_group_no_delegate
+                false
             } else {
                 // If the target is not in the leader group and the group size > 1, use delegate
                 self.groups
@@ -570,6 +561,11 @@ impl<T: Storage> Raft<T> {
         } else {
             false
         }
+    }
+
+    #[inline]
+    fn is_follower_replication_enabled(&self) -> bool {
+        self.group_id == INVALID_ID
     }
 
     /// Sends RPC, with entries to the given peer.
