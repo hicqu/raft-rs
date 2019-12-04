@@ -573,7 +573,7 @@ impl<T: Storage> Raft<T> {
     }
 
     /// Sends RPC, with entries to the given peer.
-    /// This can be called by the leader or a delegate. If the delegate call this, the field `to` 
+    /// This can be called by the leader or a delegate. If the delegate call this, the field `to`
     /// of produced message should be set to the leader id.
     pub fn send_append(&mut self, to: u64, prs: &mut ProgressSet) {
         if self.use_delegate(to) {
@@ -606,8 +606,10 @@ impl<T: Storage> Raft<T> {
                                     self.delegated_msgs.insert(gid, m);
                                     self.groups.set_delegate(delegate);
                                     return;
+                                } else {
+                                    // The the cacehd delegate progress is paused, remove the delegate
+                                    self.groups.remove_delegate(delegate);
                                 }
-                                // The the delegate progress is paused, use the normal way
                             }
                         }
                     }
@@ -622,8 +624,14 @@ impl<T: Storage> Raft<T> {
                 // Is this safe?
                 self.leader_id
             };
-            if let Some(m) = self.prepare_replicate_message_for_peer(to, from, pr) {
-                self.send(m);
+            if let Some(mut m) = self.prepare_replicate_message_for_peer(to, from, pr) {
+                if self.is_leader() {
+                    self.send(m);
+                } else {
+                    // Self is a delegate, set `from_delegate`
+                    m.from_delegate = self.id;
+                    self.send(m);
+                }
             }
         }
     }
@@ -1934,7 +1942,8 @@ impl<T: Storage> Raft<T> {
 
     /// Receive a replication message (MsgAppend or MsgSnapshot) and handle it
     pub fn handle_replication(&mut self, mut m: Message) {
-        let response = match m.msg_type {
+        // `from` of receiving message must be the leader so that `to` of the response is also the leader
+        let mut response = match m.msg_type {
             MessageType::MsgAppend => self.handle_append_entries(&m),
             MessageType::MsgSnapshot => {
                 let snapshot = m.take_snapshot();
@@ -1946,23 +1955,26 @@ impl<T: Storage> Raft<T> {
                 m.msg_type
             ),
         };
-        // Self is a delegate, handle all the members.
-        let targets = m.take_bcast_targets();
-        if !targets.is_empty() {
-            self.bcast_append(Some(&targets));
-        }
-        // Self is a normal Follower, send an extra response to the delegate if receiving msg from it.
-        if m.from_delegate != INVALID_ID {
-            let mut to_delegate = response.clone();
-            to_delegate.to = m.from_delegate;
-            // Send back to leader to update the Progress
-            self.send(response);
-            // Send back to delegate for flow control and updating the Progress
-            self.send(to_delegate);
-        } else {
-            if response.reject && !targets.is_empty() {
-                m.set_bcast_targets(targets);
+        // Self is a delegate, try to bcast_append all the members.
+        if !m.bcast_targets.is_empty() {
+            let targets = m.take_bcast_targets();
+            if response.reject {
+                // the delegate rejects appending, send back targets to the leader
+                // TODO: Does the leader still need to tell the delegate the group members?
+                response.set_bcast_targets(targets);
+                self.send(response);
+            } else {
+                self.bcast_append(Some(&targets));
             }
+        } else if m.from_delegate != INVALID_ID { // Self is a normal follower receiving msg from the delegate
+            if m.index >= self.raft_log.committed {
+                // The delegate could send a stale appending request when it becomes a delegate first time.
+                // And the follower dont need to send this response to leader since the commit index is up-to-date.
+                let to_leader = response.clone();
+                self.send(to_leader);
+            }
+            response.to = m.from_delegate;
+            // Send back to delegate for flow control and updating the Progress
             self.send(response);
         }
     }

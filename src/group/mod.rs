@@ -108,12 +108,6 @@ impl Groups {
         }
     }
 
-    /// Return the <group id>-<node id> pairs iterator
-    #[inline]
-    pub fn meta_iter(&self) -> Iter<'_, u64, Vec<u64>> {
-        self.meta.iter()
-    }
-
     /// Get group members by the member id
     #[inline]
     pub fn get_members(&self, member: u64) -> Option<Vec<u64>> {
