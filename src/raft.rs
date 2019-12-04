@@ -589,7 +589,7 @@ impl<T: Storage> Raft<T> {
                         return;
                     }
                     None => {
-                        let members = self.groups.get_members(to).unwrap(); // this is safe because of the checking in `self.use_delegate`
+                        let members = self.groups.get_members(to).cloned().unwrap(); // this is safe because of the checking in `self.use_delegate`
                         let delegate = match self.groups.get_delegate(gid) {
                             Some(cached) => cached,
                             None => self.pick_delegate(&members, prs),
@@ -625,7 +625,12 @@ impl<T: Storage> Raft<T> {
                 }
             }
         }
-        // Send Append RPC using no delegate to the given peer.
+        self.send_append_without_delegate(to, prs);
+    }
+
+    // Send Append RPC using no delegate to the given peer.
+    // This could be called by the leader or a delegate.
+    fn send_append_without_delegate(&mut self, to: u64, prs: &mut ProgressSet) {
         if let Some(pr) = prs.get_mut(to) {
             let from = if self.is_leader() {
                 INVALID_ID
@@ -721,7 +726,7 @@ impl<T: Storage> Raft<T> {
 
     /// Sends RPC, with entries to all or given peers that are not up-to-date
     /// according to the progress recorded in r.prs().
-    pub fn bcast_append(&mut self, targets: Option<&[u64]>) {
+    pub fn bcast_append(&mut self, targets: Option<&Vec<u64>>) {
         let self_id = self.id;
         let mut prs = self.take_prs();
         match targets {
@@ -1397,12 +1402,62 @@ impl<T: Storage> Raft<T> {
             }
             ProgressState::Replicate => pr.ins.free_to(m.index),
             // In the leader's ProgressSet, the flow control of a `Delegated` progress is turned off
-            // In a delegate's ProgressSet, the ProgressState will never be `Delegated`
             ProgressState::Delegated => {}
         }
+        *maybe_commit = true;
+    }
 
-        if self.is_leader() {
-            *maybe_commit = true;
+    fn handle_append_response_in_delegate(
+        &mut self,
+        m: &Message,
+        prs: &mut ProgressSet,
+    ) {
+        let pr = prs.get_mut(m.from).unwrap();
+        pr.recent_active = true;
+        if m.reject {
+            debug!(
+                self.logger,
+                "received msgAppend rejection";
+                "last index" => m.reject_hint,
+                "from" => m.from,
+                "index" => m.index,
+            );
+
+            if pr.maybe_decr_to(m.index, m.reject_hint, m.request_snapshot) {
+                debug!(
+                    self.logger,
+                    "decreased progress of {}",
+                    m.from;
+                    "progress" => ?pr,
+                );
+                if pr.state == ProgressState::Replicate {
+                    pr.become_probe();
+                }
+                self.send_append_without_delegate(m.from, prs);
+            }
+        } else {
+            if !pr.maybe_update(m.index) {
+                // No update found, skip the Progress part 
+                return;
+            } 
+            match pr.state {
+                ProgressState::Probe => pr.become_replicate(),
+                ProgressState::Snapshot => {
+                    if !pr.maybe_snapshot_abort() {
+                        return;
+                    }
+                    debug!(
+                        self.logger,
+                        "snapshot aborted, resumed sending replication messages to {from}",
+                        from = m.from;
+                        "progress" => ?pr,
+                    );
+                    pr.become_probe();
+                }
+                ProgressState::Replicate => pr.ins.free_to(m.index),
+                // In a delegate's ProgressSet, the `Delegated` state must be stale (from the former Leader role) 
+                ProgressState::Delegated => pr.become_probe(),
+            } 
         }
     }
 
@@ -1764,15 +1819,13 @@ impl<T: Storage> Raft<T> {
         }
         if send_append {
             let from = m.from;
-            if m.bcast_targets.is_empty() {
+            if m.from_delegate == INVALID_ID {
                 let mut prs = self.take_prs();
                 self.send_append(from, &mut prs);
                 self.set_prs(prs);
             } else {
-                // Get a rejection from a delegate so re-delegate the `bcast_targets`
-                // TODO: As the group config is volitale, the received `bcast_targets` might be stale
-                // Do we need to use the newest group config here?
-                self.bcast_append(Some(&m.bcast_targets));
+                let members = self.groups.get_members(m.from_delegate).cloned();
+                self.bcast_append(members.as_ref());
             }
         }
         if !more_to_send.is_empty() {
@@ -1944,6 +1997,19 @@ impl<T: Storage> Raft<T> {
                 };
                 self.read_states.push(rs);
             }
+            MessageType::MsgAppendResponse => {
+                if self.prs().get(m.from).is_none() {
+                    debug!(
+                        self.logger,
+                        "no progress available for {}",
+                        m.from;
+                    );
+                    return Ok(());
+                }
+                let mut prs = self.take_prs();
+                self.handle_append_response_in_delegate(&m, &mut prs);
+                self.set_prs(prs);
+            }
             _ => {}
         }
         Ok(())
@@ -1966,15 +2032,14 @@ impl<T: Storage> Raft<T> {
         };
         // Self is a delegate, try to bcast_append all the members.
         if !m.bcast_targets.is_empty() {
-            let targets = m.take_bcast_targets();
             if response.reject {
-                // the delegate rejects appending, send back targets to the leader
-                response.set_bcast_targets(targets);
+                response.from_delegate = self.id;
             } else {
+                let targets = m.take_bcast_targets();
                 self.bcast_append(Some(&targets));
             }
         } else if m.from_delegate != INVALID_ID { // Self is a normal follower receiving msg from the delegate
-            if m.index >= self.raft_log.committed {
+            if m.index >= self.raft_log.committed && !response.reject {
                 // The delegate could send a stale appending request when it becomes a delegate first time.
                 // And the follower dont need to send this response to leader since the commit index is up-to-date.
                 let to_leader = response.clone();

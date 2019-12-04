@@ -110,7 +110,7 @@ impl Groups {
 
     /// Get group members by the member id
     #[inline]
-    pub fn get_members(&self, member: u64) -> Option<Vec<u64>> {
+    pub fn get_members(&self, member: u64) -> Option<&Vec<u64>> {
         self.indexes
             .get(&member)
             .and_then(|group_id| self.get_members_by_group(*group_id))
@@ -118,8 +118,8 @@ impl Groups {
 
     /// Get group members by group id
     #[inline]
-    pub fn get_members_by_group(&self, group_id: u64) -> Option<Vec<u64>> {
-        self.meta.inner.get(&group_id).cloned()
+    pub fn get_members_by_group(&self, group_id: u64) -> Option<&Vec<u64>> {
+        self.meta.inner.get(&group_id)
     }
 
     /// Get group id by member id
