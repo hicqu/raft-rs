@@ -589,7 +589,7 @@ impl<T: Storage> Raft<T> {
                         return;
                     }
                     None => {
-                        let members = self.groups.get_members(to).unwrap();
+                        let members = self.groups.get_members(to).unwrap(); // this is safe because of the checking in `self.use_delegate`
                         let delegate = match self.groups.get_delegate(gid) {
                             Some(cached) => cached,
                             None => self.pick_delegate(&members, prs),
@@ -607,8 +607,17 @@ impl<T: Storage> Raft<T> {
                                     self.groups.set_delegate(delegate);
                                     return;
                                 } else {
-                                    // The the cacehd delegate progress is paused, remove the delegate
+                                    // The the cacehd delegate progress is paused, dismiss the delegate. And all the other members 
+                                    // are set to `Probe`
                                     self.groups.remove_delegate(delegate);
+                                    members.iter().filter(|id| **id != delegate).for_each(|id| {
+                                        let pr = prs.get_mut(*id).unwrap();
+                                        // This checking is necessary because the group config is changing dynamically. Some new members
+                                        // could be added between two leader's `bcast_append`
+                                        if pr.state == ProgressState::Delegated {
+                                            pr.become_probe();
+                                        }
+                                    })
                                 }
                             }
                         }
@@ -1960,7 +1969,6 @@ impl<T: Storage> Raft<T> {
             let targets = m.take_bcast_targets();
             if response.reject {
                 // the delegate rejects appending, send back targets to the leader
-                // TODO: Does the leader still need to tell the delegate the group members?
                 response.set_bcast_targets(targets);
             } else {
                 self.bcast_append(Some(&targets));
