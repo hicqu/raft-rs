@@ -61,12 +61,7 @@ impl Interface {
         match self.raft {
             Some(_) => {
                 let mut msgs = self.msgs.drain(..).collect::<Vec<_>>();
-                msgs.extend(
-                    self.delegated_msgs
-                        .drain()
-                        .map(|(_, m)| m)
-                        .collect::<Vec<_>>(),
-                );
+                msgs.extend(self.groups.take_messages());
                 msgs
             }
             None => vec![],

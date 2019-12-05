@@ -313,21 +313,15 @@ fn test_delegate_in_group_containing_leader() {
         (3, FollowerScenario::Snapshot),
         (4, FollowerScenario::UpToDate),
     ];
-    let mut sandbox = Sandbox::new(
-        &l,
-        1,
-        followers.clone(),
-        group_config.clone(),
-        5,
-        10,
-    );
+    let mut sandbox = Sandbox::new(&l, 1, followers.clone(), group_config.clone(), 5, 10);
     sandbox
         .network
         .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
         .expect("");
     let msgs = sandbox.leader_mut().read_messages();
     assert_eq!(msgs.len(), 3);
-    msgs.iter().for_each(|m| assert!(m.bcast_targets.is_empty()));
+    msgs.iter()
+        .for_each(|m| assert!(m.bcast_targets.is_empty()));
 }
 
 #[test]
@@ -345,6 +339,7 @@ fn test_broadcast_append_use_delegate() {
         5,
         10,
     );
+    dbg!(sandbox.leader().groups());
     sandbox
         .network
         .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
@@ -415,7 +410,7 @@ fn test_delegate_reject_broadcast() {
     let mut msgs = sandbox.get_mut(2).read_messages();
     assert_eq!(1, msgs.len());
     let m = msgs.pop().unwrap();
-    assert_eq!(MessageType::MsgBroadcastResp, m.msg_type);
+    assert_eq!(MessageType::MsgAppendResponse, m.msg_type);
     assert!(m.reject);
     assert_eq!(1, m.to);
     assert_eq!(
@@ -441,9 +436,9 @@ fn test_send_append_use_delegate() {
     let l = default_logger();
     let group_config = vec![(2, vec![1]), (1, vec![2, 3, 4])];
     let followers = vec![
-        (2, FollowerScenario::NeedEntries(10)),
+        (2, FollowerScenario::NeedEntries(7)),
         (3, FollowerScenario::Snapshot),
-        (4, FollowerScenario::NeedEntries(7)),
+        (4, FollowerScenario::NeedEntries(10)),
     ];
     let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 20);
     // Make a conflict next_idx in peer 2 so that `maybe_decr_to` can work.
@@ -451,18 +446,18 @@ fn test_send_append_use_delegate() {
     let mut m = new_message(2, 1, MessageType::MsgAppendResponse, 0);
     m.index = 21;
     m.reject = true;
-    m.reject_hint = 9;
+    m.reject_hint = 9; // make node2's match_idx to 9
     sandbox.network.dispatch(vec![m]).expect("");
     let msgs = sandbox.leader_mut().read_messages();
     // Pick peer 4 as the delegate
     assert_eq!(Some(4), sandbox.leader().groups().get_delegate(1));
     assert_eq!(1, msgs.len());
     let m = &msgs[0];
-    assert_eq!(m.msg_type, MessageType::MsgBroadcast);
+    assert_eq!(m.msg_type, MessageType::MsgAppend);
     assert_eq!(4, m.to);
-    assert_eq!(2, m.get_bcast_targets().len());
+    assert_eq!(1, m.get_bcast_targets().len());
     let targets = m.get_bcast_targets();
-    assert_eq!(vec![2, 3], targets);
+    assert_eq!(vec![2], targets);
     sandbox.network.send(msgs);
     assert_eq!(
         sandbox.network.peers.get(&2).unwrap().raft_log.last_index(),
@@ -470,15 +465,15 @@ fn test_send_append_use_delegate() {
     );
 }
 
-// test_delegate_paused_due_to_full_inflight ensures that if a new delegate must be chosen when the old one is paused.
+// test_delegate_paused_due_to_full_inflight ensures that if the old delegate is paused .
 #[test]
 fn test_dismiss_delegate_due_to_full_inflight() {
     let l = default_logger();
     let group_config = vec![(2, vec![1]), (1, vec![2, 3, 4])];
     let followers = vec![
-        (2, FollowerScenario::NeedEntries(7)),
-        (3, FollowerScenario::UpToDate),
-        (4, FollowerScenario::UpToDate),
+        (2, FollowerScenario::UpToDate),
+        (3, FollowerScenario::NeedEntries(7)),
+        (4, FollowerScenario::NeedEntries(10)),
     ];
     let last_index = 20;
     let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, last_index);
@@ -491,7 +486,6 @@ fn test_dismiss_delegate_due_to_full_inflight() {
                 .collect::<Vec<Message>>(),
         )
         .expect("");
-    // All the nodes should be paused except the leader
     sandbox
         .leader()
         .prs()
@@ -546,7 +540,7 @@ fn test_dismiss_delegate_due_to_full_inflight() {
     let msgs = sandbox.leader_mut().read_messages();
     assert_eq!(1, msgs.len());
     msgs.iter().for_each(|m| {
-        assert_eq!(MessageType::MsgBroadcast, m.msg_type);
+        assert_eq!(MessageType::MsgAppend, m.msg_type);
         assert_eq!(4, m.to);
     })
 }

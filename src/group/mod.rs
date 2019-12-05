@@ -111,6 +111,11 @@ impl Groups {
             .collect::<Vec<_>>()
     }
 
+    #[inline]
+    pub(crate) fn has_message(&self) -> bool {
+        self.delegated_msgs.is_empty()
+    }
+
     /// Create a DelegatedMessage and push it to the corresponding `delegated_msgs`
     pub(crate) fn insert_delegated_msg(&mut self, group_id: u64, m: Message, peer: Option<u64>) {
         let mut set = HashSet::default();

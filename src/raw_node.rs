@@ -134,12 +134,8 @@ impl Ready {
         if !raft.msgs.is_empty() {
             mem::swap(&mut raft.msgs, &mut rd.messages);
         }
-        if !raft.delegated_msgs.is_empty() {
-            let msgs = raft
-                .delegated_msgs
-                .drain()
-                .map(|(_, m)| m)
-                .collect::<Vec<Message>>();
+        if !raft.groups.has_message() {
+            let msgs = raft.groups.take_messages();
             rd.messages.extend(msgs);
         }
         rd.committed_entries = Some(

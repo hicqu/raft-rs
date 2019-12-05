@@ -130,9 +130,6 @@ pub struct Raft<T: Storage> {
     /// The list of messages.
     pub msgs: Vec<Message>,
 
-    /// The especial map for messages to be sent to group delegates.
-    pub delegated_msgs: HashMap<u64, Message>,
-
     /// The leader id
     pub leader_id: u64,
 
@@ -251,7 +248,6 @@ impl<T: Storage> Raft<T> {
             election_timeout: c.election_tick,
             votes: Default::default(),
             msgs: Default::default(),
-            delegated_msgs: HashMap::default(),
             leader_id: Default::default(),
             lead_transferee: None,
             term: Default::default(),
@@ -578,9 +574,9 @@ impl<T: Storage> Raft<T> {
             let mut groups = self.take_groups();
             match groups.get_latest_delegated_msg(gid) {
                 Some(m) => {
-                    let mut pr = prs.get_mut(to).unwrap();
                     // `to` is a delegate
                     if to == m.inner.to {
+                        let mut pr = prs.get_mut(to).unwrap();
                         assert_eq!(
                             pr.pending_request_snapshot, INVALID_INDEX,
                             "The delegate must have been dismissed if it is requesting a snapshot"
@@ -589,7 +585,7 @@ impl<T: Storage> Raft<T> {
                         match self.prepare_replicate_message_for_peer(self.id, to, &mut pr, false) {
                             None => {
                                 // Delegate paused
-                                self.groups.remove_delegate(to);
+                                groups.remove_delegate(to);
                             }
                             Some(mut msg) => {
                                 // Try batch
@@ -606,22 +602,26 @@ impl<T: Storage> Raft<T> {
                                     m.inner.set_entries(batched_ents.into());
                                 } else {
                                     // Unable to batch, create a new DelegatedMessage
-                                    self.groups.insert_delegated_msg(gid, msg, None);
+                                    groups.insert_delegated_msg(gid, msg, None);
                                 }
                             }
                         }
-                    } else {
+                        self.set_groups(groups);
+                        return;
+                    } else if !prs.get(m.inner.to).map_or(true, |pr| pr.is_paused()) {
                         m.delegated_peers.insert(to);
                         // This just clean all the Inflights though there could be some MsgAppendResp on the way. And from
                         // now the delegate will take over the flow control of the peer `to`.
+                        let pr = prs.get_mut(to).unwrap();
                         pr.become_delegated();
+                        self.set_groups(groups);
+                        return;
                     }
-                    return;
                 }
                 // Pick a delegate and create a new DelegatedMessage
                 None => {
-                    let members = self.groups.get_members(to).unwrap(); // this is safe because of the checking in `self.use_delegate`
-                    let delegate = match self.groups.get_delegate(gid) {
+                    let members = groups.get_members(to).unwrap();
+                    let delegate = match groups.get_delegate(gid) {
                         Some(cached) => cached,
                         None => self.pick_delegate(&members, prs),
                     };
@@ -631,11 +631,12 @@ impl<T: Storage> Raft<T> {
                             self.prepare_replicate_message_for_peer(self.id, delegate, pr, false)
                         {
                             let peer = if to != delegate { Some(to) } else { None };
-                            self.groups.insert_delegated_msg(gid, m, peer);
-                            self.groups.set_delegate(delegate);
+                            groups.insert_delegated_msg(gid, m, peer);
+                            groups.set_delegate(delegate);
+                            self.set_groups(groups);
                             return;
                         } else {
-                            self.groups.remove_delegate(delegate);
+                            groups.remove_delegate(delegate);
                         }
                     }
                 }
