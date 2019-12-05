@@ -282,6 +282,7 @@ impl Progress {
                 "updating progress state in unhandled state {:?}",
                 self.state
             ),
+            // TODO: For now just treated as Replicate
             // NOTICE: When the leader resume origin Log Replication of a `Delegated` peer, there might
             // be still some MsgAppendResp on the fly. But it's safe to just `add(last)` as `free_to` will ignore the idx out of the window.
             ProgressState::Delegated => {

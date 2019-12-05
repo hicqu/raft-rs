@@ -17,8 +17,9 @@
 //! # Follower Replication
 //! See https://github.com/tikv/rfcs/pull/33
 
+use crate::eraftpb::Message;
 use std::collections::hash_map::Iter;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
 
 /// Configuration for distribution of raft nodes in groups.
@@ -50,7 +51,22 @@ impl Default for GroupsConfig {
     }
 }
 
-/// Raft group configuration
+#[derive(Clone, Debug)]
+pub(crate) struct DelegatedMessage {
+    pub delegated_peers: HashSet<u64>,
+    pub inner: Message,
+}
+
+impl DelegatedMessage {
+    fn into_message(mut self) -> Message {
+        let targets = self.delegated_peers.drain().collect::<Vec<_>>();
+        let mut m = self.inner;
+        m.bcast_targets = targets;
+        m
+    }
+}
+
+/// Maintain all the groups info in Follower Replication
 ///
 /// # Notice
 ///
@@ -60,6 +76,9 @@ impl Default for GroupsConfig {
 pub struct Groups {
     /// Group config metadata
     pub meta: GroupsConfig,
+    // The messages to be sent to any delegates
+    // The key is a group ID
+    delegated_msgs: HashMap<u64, Vec<DelegatedMessage>>,
     // node id => group id
     indexes: HashMap<u64, u64>,
     // group id => delegate id
@@ -82,9 +101,50 @@ impl Groups {
         }
     }
 
+    /// Take all the delegated messages into a vec
+    #[inline]
+    pub fn take_messages(&mut self) -> Vec<Message> {
+        self.delegated_msgs
+            .drain()
+            .map(|(_, mut msgs)| msgs.drain(..).map(|m| m.into_message()).collect::<Vec<_>>())
+            .flatten()
+            .collect::<Vec<_>>()
+    }
+
+    /// Create a DelegatedMessage and push it to the corresponding `delegated_msgs`
+    pub(crate) fn insert_delegated_msg(&mut self, group_id: u64, m: Message, peer: Option<u64>) {
+        let mut set = HashSet::default();
+        if let Some(p) = peer {
+            set.insert(p);
+        }
+        let msg = DelegatedMessage {
+            delegated_peers: set,
+            inner: m,
+        };
+        match self.delegated_msgs.get_mut(&group_id) {
+            Some(msgs) => {
+                msgs.push(msg);
+            }
+            None => {
+                self.delegated_msgs.insert(group_id, vec![msg]);
+            }
+        }
+    }
+
+    /// Get the last delegated message
+    #[inline]
+    pub(crate) fn get_latest_delegated_msg(
+        &mut self,
+        group_id: u64,
+    ) -> Option<&mut DelegatedMessage> {
+        self.delegated_msgs
+            .get_mut(&group_id)
+            .and_then(|msgs| msgs.last_mut())
+    }
+
     /// Get group members by the member id
     #[inline]
-    pub fn get_members(&self, member: u64) -> Option<&Vec<u64>> {
+    pub fn get_members(&self, member: u64) -> Option<Vec<u64>> {
         self.indexes
             .get(&member)
             .and_then(|group_id| self.get_members_by_group(*group_id))
@@ -92,8 +152,8 @@ impl Groups {
 
     /// Get group members by group id
     #[inline]
-    pub fn get_members_by_group(&self, group_id: u64) -> Option<&Vec<u64>> {
-        self.meta.inner.get(&group_id)
+    pub fn get_members_by_group(&self, group_id: u64) -> Option<Vec<u64>> {
+        self.meta.inner.get(&group_id).cloned()
     }
 
     /// Get group id by member id
@@ -151,6 +211,7 @@ impl Default for Groups {
             meta: Default::default(),
             indexes: HashMap::new(),
             delegate_cache: HashMap::new(),
+            delegated_msgs: HashMap::new(),
         }
     }
 }
