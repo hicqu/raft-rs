@@ -608,7 +608,23 @@ impl<T: Storage> Raft<T> {
                         }
                         self.set_groups(groups);
                         return;
-                    } else if !prs.get(m.inner.to).map_or(true, |pr| pr.is_paused()) {
+                    } else if let Some(pr) = prs.get(m.inner.to) {
+                        // TODO: Is None possible? If not, we can just use unwrap
+                        if m.inner.msg_type == MessageType::MsgAppend
+                            && m.inner.index < self.raft_log.last_index()
+                        {
+                            let size = util::compute_ents_size(m.inner.entries.as_slice());
+                            if self.max_msg_size - size > 0 {
+                                if let Ok(ents) = self
+                                    .raft_log
+                                    .entries(pr.next_idx - 1, self.max_msg_size - size)
+                                {
+                                    for e in ents {
+                                        m.inner.mut_entries().push(e);
+                                    }
+                                }
+                            }
+                        }
                         m.delegated_peers.insert(to);
                         // This just clean all the Inflights though there could be some MsgAppendResp on the way. And from
                         // now the delegate will take over the flow control of the peer `to`.
@@ -617,6 +633,7 @@ impl<T: Storage> Raft<T> {
                         self.set_groups(groups);
                         return;
                     }
+                    // Leader send raft logs itself
                 }
                 // Pick a delegate and create a new DelegatedMessage
                 None => {
