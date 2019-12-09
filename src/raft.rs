@@ -216,6 +216,7 @@ impl<T: Storage> Raft<T> {
         let conf_state = &raft_state.conf_state;
         let voters = &conf_state.voters;
         let learners = &conf_state.learners;
+
         let mut r = Raft {
             id: c.id,
             read_states: Default::default(),
@@ -489,18 +490,12 @@ impl<T: Storage> Raft<T> {
         true
     }
 
-    fn prepare_send_entries(
-        &mut self,
-        m: &mut Message,
-        pr: &mut Progress,
-        term: u64,
-        ents: Vec<Entry>,
-    ) {
+    fn prepare_send_entries(&mut self, m: &mut Message, pr: &mut Progress, ents: Vec<Entry>) {
         m.set_msg_type(MessageType::MsgAppend);
         m.index = pr.next_idx - 1;
-        m.log_term = term;
-        m.set_entries(ents.into());
+        m.log_term = self.raft_log.term(m.index).unwrap();
         m.commit = self.raft_log.committed;
+        m.set_entries(ents.into());
         if !m.entries.is_empty() {
             let last = m.entries.last().unwrap().index;
             pr.update_state(last);
@@ -531,161 +526,8 @@ impl<T: Storage> Raft<T> {
         is_batched
     }
 
-    // Whether the leader can send raft logs through Follower Replication
-    // and returns the group id of the given peer.
-    #[inline]
-    fn use_delegate(&self, to: u64) -> Option<u64> {
-        if self.is_follower_replication_enabled()
-            && self.is_leader()
-            && self
-                .groups
-                .get_members(to)
-                .map_or(0, |members| members.len())
-                > 1
-            && !self.groups.in_same_group(self.id, to)
-        {
-            self.groups.get_group_id(to)
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    fn is_follower_replication_enabled(&self) -> bool {
-        self.group_id == INVALID_ID
-    }
-
     /// Sends RPC, with entries to the given peer.
-    /// This can be called by the leader or a delegate. If the delegate call this, it ignores the Follower Replication and the field `to`
-    /// of produced message will be set to the leader id.
-    pub fn send_append(&mut self, to: u64, prs: &mut ProgressSet) {
-        if let Some(gid) = self.use_delegate(to) {
-            let mut groups = self.take_groups();
-            match groups.get_latest_delegated_msg(gid) {
-                Some(m) => {
-                    // `to` is a delegate
-                    if to == m.inner.to {
-                        let mut pr = prs.get_mut(to).unwrap();
-                        assert_eq!(
-                            pr.pending_request_snapshot, INVALID_INDEX,
-                            "The delegate must have been dismissed if it is requesting a snapshot"
-                        );
-                        // TODO: If we can batch this message, the Message::default() is unnecessary
-                        match self.prepare_replicate_message_for_peer(self.id, to, &mut pr, false) {
-                            None => {
-                                // Delegate paused
-                                groups.remove_delegate(to);
-                            }
-                            Some(mut msg) => {
-                                // Try batch
-                                if msg.msg_type == MessageType::MsgAppend
-                                    && m.inner.msg_type == MessageType::MsgAppend
-                                    && util::is_continuous_ents(&m.inner, &msg.entries.as_slice())
-                                {
-                                    // TODO: Can we positively assume the delegate not requiring a snapshot here?
-                                    let mut batched_ents: Vec<Entry> =
-                                        m.inner.take_entries().into();
-                                    let ents: Vec<Entry> = msg.take_entries().into();
-                                    batched_ents.extend(ents);
-                                    util::limit_size(&mut batched_ents, Some(self.max_msg_size));
-                                    m.inner.set_entries(batched_ents.into());
-                                } else {
-                                    // Unable to batch, create a new DelegatedMessage
-                                    groups.insert_delegated_msg(gid, msg, None);
-                                }
-                            }
-                        }
-                        self.set_groups(groups);
-                        return;
-                    } else if let Some(pr) = prs.get(m.inner.to) {
-                        // TODO: Is None possible? If not, we can just use unwrap
-                        if m.inner.msg_type == MessageType::MsgAppend
-                            && m.inner.index < self.raft_log.last_index()
-                        {
-                            let size = util::compute_ents_size(m.inner.entries.as_slice());
-                            if self.max_msg_size - size > 0 {
-                                if let Ok(ents) = self
-                                    .raft_log
-                                    .entries(pr.next_idx - 1, self.max_msg_size - size)
-                                {
-                                    for e in ents {
-                                        m.inner.mut_entries().push(e);
-                                    }
-                                }
-                            }
-                        }
-                        m.delegated_peers.insert(to);
-                        // This just clean all the Inflights though there could be some MsgAppendResp on the way. And from
-                        // now the delegate will take over the flow control of the peer `to`.
-                        let pr = prs.get_mut(to).unwrap();
-                        pr.become_delegated();
-                        self.set_groups(groups);
-                        return;
-                    }
-                    // Leader send raft logs itself
-                }
-                // Pick a delegate and create a new DelegatedMessage
-                None => {
-                    let members = groups.get_members(to).unwrap();
-                    let delegate = match groups.get_delegate(gid) {
-                        Some(cached) => cached,
-                        None => self.pick_delegate(&members, prs),
-                    };
-                    if delegate != INVALID_ID {
-                        let pr = prs.get_mut(delegate).unwrap();
-                        if let Some(m) =
-                            self.prepare_replicate_message_for_peer(self.id, delegate, pr, false)
-                        {
-                            let peer = if to != delegate { Some(to) } else { None };
-                            groups.insert_delegated_msg(gid, m, peer);
-                            groups.set_delegate(delegate);
-                            self.set_groups(groups);
-                            return;
-                        } else {
-                            groups.remove_delegate(delegate);
-                        }
-                    }
-                }
-            }
-            self.set_groups(groups);
-        }
-        self.send_append_without_delegate(to, prs);
-    }
-
-    // Send Append RPC using no delegate to the given peer.
-    // This could be called by the leader or a delegate.
-    fn send_append_without_delegate(&mut self, to: u64, prs: &mut ProgressSet) {
-        if let Some(pr) = prs.get_mut(to) {
-            let from = if self.is_leader() {
-                INVALID_ID
-            } else {
-                // Is this safe?
-                self.leader_id
-            };
-            if let Some(mut m) = self.prepare_replicate_message_for_peer(from, to, pr, true) {
-                if self.is_leader() {
-                    self.send(m);
-                } else {
-                    // Self is a delegate, set `from_delegate`
-                    m.from_delegate = self.id;
-                    self.send(m);
-                }
-            }
-        }
-    }
-
-    // Prepare a message to send entries or snapshot for given peer
-    // Return `None` only in conditions below :
-    //      - given `pr` is paused
-    //      - Snapshot is temporarily unavailable
-    //      - Not `recent_active`
-    fn prepare_replicate_message_for_peer(
-        &mut self,
-        from: u64,
-        to: u64,
-        pr: &mut Progress,
-        batch_append: bool,
-    ) -> Option<Message> {
+    pub fn send_append(&mut self, to: u64, pr: &mut Progress) {
         if pr.is_paused() {
             trace!(
                 self.logger,
@@ -693,41 +535,49 @@ impl<T: Storage> Raft<T> {
                 to = to;
                 "progress" => ?pr,
             );
-            return None;
+            return;
         }
         let mut m = Message::default();
+        if self.leader_id != self.id {
+            // For delegates.
+            m.from_delegate = self.id;
+        }
         m.to = to;
-        m.from = from;
+
         if pr.pending_request_snapshot != INVALID_INDEX {
             // Check pending request snapshot first to avoid unnecessary loading entries.
             if !self.prepare_send_snapshot(&mut m, pr, to) {
-                return None;
+                return;
             }
         } else {
             let term = self.raft_log.term(pr.next_idx - 1);
             let ents = self.raft_log.entries(pr.next_idx, self.max_msg_size);
             if term.is_err() || ents.is_err() {
-                // send snapshot if we failed to get term or entries
-                trace!(
-                    self.logger,
-                    "Skipping sending to {to}",
-                    to = to;
-                    "index" => pr.next_idx,
-                    "term" => ?term,
-                    "ents" => ?ents,
-                );
+                // send snapshot if we failed to get term or entries.
                 if !self.prepare_send_snapshot(&mut m, pr, to) {
-                    return None;
+                    return;
                 }
             } else {
                 let mut ents = ents.unwrap();
-                if self.batch_append && batch_append && self.try_batching(to, pr, &mut ents) {
-                    return None;
+                if self.batch_append && self.try_batching(to, pr, &mut ents) {
+                    return;
                 }
-                self.prepare_send_entries(&mut m, pr, term.unwrap(), ents);
+                self.prepare_send_entries(&mut m, pr, ents);
             }
         }
-        Some(m)
+        self.send(m);
+    }
+
+    fn send_append_with_bcast_targets(&mut self, to: u64, pr: &mut Progress, targets: Vec<u64>) {
+        let old_msg_len = self.msgs.len();
+        self.send_append(to, pr);
+        let new_msg_len = self.msgs.len();
+        if new_msg_len > old_msg_len {
+            self.msgs[old_msg_len].set_bcast_targets(targets);
+        } else {
+            // TODO(qupeng): is it possible? Remove it later.
+            panic!("should be impossible in send_append_with_bcast_targets");
+        }
     }
 
     // send_heartbeat sends an empty MsgAppend
@@ -751,21 +601,48 @@ impl<T: Storage> Raft<T> {
 
     /// Sends RPC, with entries to all or given peers that are not up-to-date
     /// according to the progress recorded in r.prs().
-    pub fn bcast_append(&mut self, targets: Option<Vec<u64>>) {
+    pub fn bcast_append(&mut self) {
         let self_id = self.id;
         let mut prs = self.take_prs();
-        match targets {
-            None => {
-                let ids = prs.peer_ids();
-                ids.iter()
-                    .filter(|id| **id != self_id)
-                    .for_each(|id| self.send_append(*id, &mut prs));
+        let old_msg_len = self.msgs.len();
+
+        // Targets and their delegates.
+        let targets: Vec<(u64, u64)> = prs
+            .iter()
+            .filter_map(|(id, _)| {
+                if *id == self_id {
+                    None
+                } else {
+                    Some((*id, INVALID_ID))
+                }
+            })
+            .collect();
+
+        let targets: Vec<(u64, u64)> = targets
+            .into_iter()
+            .filter_map(|(id, _)| {
+                let delegate = self.pick_delegate(id, &prs);
+                if delegate == INVALID_ID {
+                    self.send_append(id, prs.get_mut(id).unwrap());
+                    return None;
+                }
+                Some((id, delegate))
+            })
+            .collect();
+
+        'LOOP: for (id, delegate) in targets {
+            for m in &mut self.msgs[old_msg_len..] {
+                if m.get_msg_type() == MessageType::MsgAppend && m.get_to() == delegate {
+                    m.mut_bcast_targets().push(id);
+                    continue 'LOOP;
+                }
             }
-            Some(set) => set
-                .iter()
-                .filter(|id| **id != self_id)
-                .for_each(|id| self.send_append(*id, &mut prs)),
-        };
+            let mut m = Message::default();
+            self.prepare_send_entries(&mut m, prs.get_mut(delegate).unwrap(), vec![]);
+            m.mut_bcast_targets().push(id);
+            self.send(m);
+        }
+
         self.set_prs(prs);
     }
 
@@ -1400,9 +1277,6 @@ impl<T: Storage> Raft<T> {
                 if pr.state == ProgressState::Replicate {
                     pr.become_probe();
                 }
-                if m.request_snapshot != INVALID_INDEX {
-                    self.groups.remove_delegate(m.from);
-                }
                 *send_append = true;
             }
             return;
@@ -1429,60 +1303,8 @@ impl<T: Storage> Raft<T> {
                 pr.become_probe();
             }
             ProgressState::Replicate => pr.ins.free_to(m.index),
-            // In the leader's ProgressSet, the flow control of a `Delegated` progress is turned off
-            ProgressState::Delegated => {}
         }
         *maybe_commit = true;
-    }
-
-    fn handle_append_response_in_delegate(&mut self, m: &Message, prs: &mut ProgressSet) {
-        let pr = prs.get_mut(m.from).unwrap();
-        pr.recent_active = true;
-        if m.reject {
-            debug!(
-                self.logger,
-                "received msgAppend rejection";
-                "last index" => m.reject_hint,
-                "from" => m.from,
-                "index" => m.index,
-            );
-
-            if pr.maybe_decr_to(m.index, m.reject_hint, m.request_snapshot) {
-                debug!(
-                    self.logger,
-                    "decreased progress of {}",
-                    m.from;
-                    "progress" => ?pr,
-                );
-                if pr.state == ProgressState::Replicate {
-                    pr.become_probe();
-                }
-                self.send_append_without_delegate(m.from, prs);
-            }
-        } else {
-            if !pr.maybe_update(m.index) {
-                // No update found, skip the Progress part
-                return;
-            }
-            match pr.state {
-                ProgressState::Probe => pr.become_replicate(),
-                ProgressState::Snapshot => {
-                    if !pr.maybe_snapshot_abort() {
-                        return;
-                    }
-                    debug!(
-                        self.logger,
-                        "snapshot aborted, resumed sending replication messages to {from}",
-                        from = m.from;
-                        "progress" => ?pr,
-                    );
-                    pr.become_probe();
-                }
-                ProgressState::Replicate => pr.ins.free_to(m.index),
-                // In a delegate's ProgressSet, the `Delegated` state must be stale (from the former Leader role)
-                ProgressState::Delegated => pr.become_probe(),
-            }
-        }
     }
 
     fn process_leader_transfer(&mut self, from: u64, match_idx: u64) {
@@ -1610,7 +1432,7 @@ impl<T: Storage> Raft<T> {
                 lead_transferee = lead_transferee;
             );
         } else {
-            self.send_append(lead_transferee, prs);
+            self.send_append(lead_transferee, pr);
         }
     }
 
@@ -1645,7 +1467,7 @@ impl<T: Storage> Raft<T> {
     /// Check message's progress to decide which action should be taken.
     fn check_message_with_progress(
         &mut self,
-        m: &mut Message,
+        m: &Message,
         send_append: &mut bool,
         old_paused: &mut bool,
         maybe_commit: &mut bool,
@@ -1659,6 +1481,7 @@ impl<T: Storage> Raft<T> {
             );
             return;
         }
+
         let mut prs = self.take_prs();
         match m.get_msg_type() {
             MessageType::MsgAppendResponse => {
@@ -1753,7 +1576,7 @@ impl<T: Storage> Raft<T> {
                     }
                 }
                 self.append_entry(&mut m.mut_entries());
-                self.bcast_append(None);
+                self.bcast_append();
                 return Ok(());
             }
             MessageType::MsgReadIndex => {
@@ -1833,7 +1656,7 @@ impl<T: Storage> Raft<T> {
         if maybe_commit {
             if self.maybe_commit() {
                 if self.should_bcast_commit() {
-                    self.bcast_append(None);
+                    self.bcast_append();
                 }
             } else if old_paused {
                 // update() reset the wait state on this node. If we had delayed sending
@@ -1841,21 +1664,25 @@ impl<T: Storage> Raft<T> {
                 send_append = true;
             }
         }
-        if send_append {
-            let from = m.from;
-            if m.from_delegate == INVALID_ID {
-                let mut prs = self.take_prs();
-                self.send_append(from, &mut prs);
-                self.set_prs(prs);
-            } else {
-                let members = self.groups.get_members(m.from_delegate);
-                self.bcast_append(members);
-            }
+
+        if send_append && m.from_delegate == 0 {
+            let mut prs = self.take_prs();
+            self.send_append_with_bcast_targets(
+                m.from,
+                prs.get_mut(m.from).unwrap(),
+                m.take_bcast_targets(),
+            );
+            self.set_prs(prs);
         }
+
         if !more_to_send.is_empty() {
             for to_send in more_to_send.drain(..) {
                 self.send(to_send);
             }
+        }
+
+        if !self.prs().get(m.from).unwrap().can_be_delegate() {
+            self.groups.remove_delegate(m.from);
         }
 
         Ok(())
@@ -1873,15 +1700,20 @@ impl<T: Storage> Raft<T> {
                 );
                 return Err(Error::ProposalDropped);
             }
-            MessageType::MsgAppend | MessageType::MsgSnapshot => {
+            MessageType::MsgAppend => {
                 debug_assert_eq!(self.term, m.term);
                 self.become_follower(m.term, m.from);
-                self.handle_replication(m);
+                self.handle_append_message(m);
             }
             MessageType::MsgHeartbeat => {
                 debug_assert_eq!(self.term, m.term);
                 self.become_follower(m.term, m.from);
                 self.handle_heartbeat(m);
+            }
+            MessageType::MsgSnapshot => {
+                debug_assert_eq!(self.term, m.term);
+                self.become_follower(m.term, m.from);
+                self.handle_snapshot(m);
             }
             MessageType::MsgRequestPreVoteResponse | MessageType::MsgRequestVoteResponse => {
                 // Only handle vote responses corresponding to our candidacy (while in
@@ -1912,7 +1744,7 @@ impl<T: Storage> Raft<T> {
                             self.campaign(CAMPAIGN_ELECTION);
                         } else {
                             self.become_leader();
-                            self.bcast_append(None);
+                            self.bcast_append();
                         }
                     }
                     CandidacyStatus::Ineligible => {
@@ -1950,15 +1782,20 @@ impl<T: Storage> Raft<T> {
                 m.to = self.leader_id;
                 self.send(m);
             }
-            MessageType::MsgAppend | MessageType::MsgSnapshot => {
+            MessageType::MsgAppend => {
                 self.election_elapsed = 0;
                 self.leader_id = m.from;
-                self.handle_replication(m);
+                self.handle_append_message(m);
             }
             MessageType::MsgHeartbeat => {
                 self.election_elapsed = 0;
                 self.leader_id = m.from;
                 self.handle_heartbeat(m);
+            }
+            MessageType::MsgSnapshot => {
+                self.election_elapsed = 0;
+                self.leader_id = m.from;
+                self.handle_snapshot(m);
             }
             MessageType::MsgTransferLeader => {
                 if self.leader_id == INVALID_ID {
@@ -2023,49 +1860,20 @@ impl<T: Storage> Raft<T> {
             }
             MessageType::MsgAppendResponse => {
                 let mut prs = self.take_prs();
-                self.handle_append_response_in_delegate(&m, &mut prs);
+                let mut send_append = false;
+                let (mut _h1, mut _h2) = (false, false);
+                self.handle_append_response(&m, &mut prs, &mut _h1, &mut send_append, &mut _h2);
                 self.set_prs(prs);
+                if send_append {
+                    let from = m.from;
+                    let mut prs = self.take_prs();
+                    self.send_append(from, prs.get_mut(from).unwrap());
+                    self.set_prs(prs);
+                }
             }
             _ => {}
         }
         Ok(())
-    }
-
-    /// Receive a replication message (MsgAppend or MsgSnapshot) and handle it
-    pub fn handle_replication(&mut self, mut m: Message) {
-        // `from` of receiving message must be the leader so that `to` of the response is also the leader
-        let mut response = match m.msg_type {
-            MessageType::MsgAppend => self.handle_append_entries(&m),
-            MessageType::MsgSnapshot => {
-                let snapshot = m.take_snapshot();
-                self.handle_snapshot(&m, snapshot)
-            }
-            _ => fatal!(
-                self.logger,
-                "expect a message for doing replication (MsgAppend or MsgSnapshot), but got {:?}",
-                m.msg_type
-            ),
-        };
-        // Self is a delegate, try to bcast_append all the members.
-        if !m.bcast_targets.is_empty() {
-            if response.reject {
-                response.from_delegate = self.id;
-            } else {
-                let targets = m.take_bcast_targets();
-                self.bcast_append(Some(targets));
-            }
-        } else if m.from_delegate != INVALID_ID {
-            // Self is a normal follower receiving msg from the delegate
-            if m.index >= self.raft_log.committed && !response.reject {
-                // The delegate could send a stale appending request when it becomes a delegate first time.
-                // And the follower dont need to send this response to leader since the commit index is up-to-date.
-                let to_leader = response.clone();
-                self.send(to_leader);
-            }
-            // Send back to delegate for flow control and updating the Progress
-            response.to = m.from_delegate;
-        }
-        self.send(response);
     }
 
     /// Request a snapshot from a leader.
@@ -2100,27 +1908,58 @@ impl<T: Storage> Raft<T> {
     }
 
     /// For a given message, append the entries to the log.
-    fn handle_append_entries(&mut self, m: &Message) -> Message {
+    fn handle_append_message(&mut self, mut m: Message) {
         if self.pending_request_snapshot != INVALID_INDEX {
-            return self.prepare_request_snapshot(self.leader_id);
+            self.send_request_snapshot();
+            return;
         }
+
         let mut to_send = Message::default();
         to_send.set_msg_type(MessageType::MsgAppendResponse);
         to_send.to = m.from;
+
         if m.index < self.raft_log.committed {
             debug!(
                 self.logger,
                 "got message with lower index than committed.";
             );
             to_send.index = self.raft_log.committed;
-            return to_send;
+            self.send(to_send);
+            return;
         }
+
+        if self.handle_append_entries(&m, &mut to_send) {
+            self.send(to_send);
+            let mut prs = self.take_prs();
+            for target in m.take_bcast_targets() {
+                if let Some(pr) = prs.get_mut(target) {
+                    pr.reset_on_delegate(self.raft_log.last_index() + 1);
+                    self.send_append(target, pr);
+                }
+            }
+            self.set_prs(prs);
+        } else {
+            to_send.set_bcast_targets(m.take_bcast_targets());
+            self.send(to_send);
+        }
+    }
+
+    fn handle_append_entries(&mut self, m: &Message, to_send: &mut Message) -> bool {
         debug_assert!(m.log_term != 0, "{:?} log term can't be 0", m);
         if let Some((_, last_idx)) = self
             .raft_log
             .maybe_append(m.index, m.log_term, m.commit, &m.entries)
         {
             to_send.set_index(last_idx);
+            if m.from_delegate != INVALID_ID {
+                // TODO(qupeng): in responses `from_delegate` indicates the entries come from delegates.
+                // Maybe we need to rename the field.
+                to_send.from_delegate = m.from_delegate;
+                let mut to_delegate = to_send.clone();
+                to_delegate.to = m.from_delegate;
+                self.send(to_delegate);
+            }
+            true
         } else {
             debug!(
                 self.logger,
@@ -2135,8 +1974,8 @@ impl<T: Storage> Raft<T> {
             to_send.index = m.index;
             to_send.reject = true;
             to_send.reject_hint = self.raft_log.last_index();
+            false
         }
-        to_send
     }
 
     // TODO: revoke pub when there is a better way to test.
@@ -2154,15 +1993,14 @@ impl<T: Storage> Raft<T> {
         self.send(to_send);
     }
 
-    // A follower never rejects a MsgSnapshot
-    fn handle_snapshot(&mut self, m: &Message, snapshot: Snapshot) -> Message {
+    fn handle_snapshot(&mut self, mut m: Message) {
         debug_assert!(m.term != 0, "{:?} term can't be 0", m);
         let metadata = m.get_snapshot().get_metadata();
         let (sindex, sterm) = (metadata.index, metadata.term);
         let mut to_send = Message::default();
         to_send.set_msg_type(MessageType::MsgAppendResponse);
         to_send.to = m.from;
-        if self.restore(snapshot) {
+        if self.restore(m.take_snapshot()) {
             info!(
                 self.logger,
                 "[commit: {commit}, term: {term}] restored snapshot [index: {snapshot_index}, term: {snapshot_term}]",
@@ -2172,6 +2010,11 @@ impl<T: Storage> Raft<T> {
                 snapshot_term = sterm;
             );
             to_send.index = self.raft_log.last_index();
+            if m.from_delegate != INVALID_ID {
+                let mut to_delegate = to_send.clone();
+                to_delegate.to = m.from_delegate;
+                self.send(to_delegate);
+            }
         } else {
             info!(
                 self.logger,
@@ -2182,7 +2025,7 @@ impl<T: Storage> Raft<T> {
             );
             to_send.index = self.raft_log.committed;
         }
-        to_send
+        self.send(to_send);
     }
 
     fn restore_raft(&mut self, snap: &Snapshot) -> Option<bool> {
@@ -2358,7 +2201,7 @@ impl<T: Storage> Raft<T> {
         // The quorum size is now smaller, so see if any pending entries can
         // be committed.
         if self.maybe_commit() {
-            self.bcast_append(None);
+            self.bcast_append();
         }
         // If the removed node is the lead_transferee, then abort the leadership transferring.
         if self.is_leader() && self.lead_transferee == Some(id) {
@@ -2519,45 +2362,38 @@ impl<T: Storage> Raft<T> {
     // Pick a delegate of the given group
     //
     // The delegate must satisfy conditions below:
-    // 1. Must be 'recent_active'
-    // 2. The progress state should be 'Replicate' but not 'paused'
-    // 3. The progress has biggest 'match'
-    // 4. Not requiring a snapshot
-    //
-    // Especially if all the members in a group needs snapshot, choose the delegate randomly.
-    //
-    fn pick_delegate(&self, group: &[u64], prs: &ProgressSet) -> u64 {
-        let mut to_send_snapshot = vec![];
-        let first_index = self.raft_log.first_index();
-        let (_, delegate_id) = group.iter().filter(|member| **member != self.id).fold(
-            (INVALID_INDEX, INVALID_ID),
-            |(mut max_matched, mut id), member| {
-                if let Some(pr) = prs.get(*member) {
-                    // `pr.pending_request_snapshot` can be passed as the delegate can send snapshots
-                    // to other members now
-                    if !pr.is_paused() {
-                        let term = self.raft_log.term(pr.next_idx - 1);
-                        if term.is_err() || pr.next_idx < first_index {
-                            to_send_snapshot.push(*member);
-                        } else if pr.matched > max_matched
-                            && pr.recent_active
-                            && pr.state == ProgressState::Replicate
-                        {
-                            max_matched = pr.matched;
-                            id = *member;
-                        }
-                    }
-                }
-                (max_matched, id)
-            },
-        );
-        if delegate_id == INVALID_ID && !to_send_snapshot.is_empty() {
-            // All the members need snapshot, choose the delegate randomly. It's safe since they're all unpaused.
-            to_send_snapshot[0]
-        } else {
-            // In the situation where every member is paused(or not recent_active) but not requring a snapshot, we get a invalid delegate.
-            // Otherwise, the `delegate_id` must be valid.
-            delegate_id
+    // 1. The progress state should be `ProgressState::Replicate`;
+    // 2. The progress has biggest `match`;
+    fn pick_delegate(&mut self, to: u64, prs: &ProgressSet) -> u64 {
+        if !self.is_leader() {
+            return INVALID_ID;
         }
+        let group_id = match self.groups.get_group_id(to) {
+            Some(gid) => gid,
+            None => return INVALID_ID,
+        };
+        let members = self.groups.get_members(group_id);
+        if members.len() <= 1 || self.group_id == group_id {
+            return INVALID_ID;
+        }
+
+        if let Some(delegate) = self.groups.get_delegate(group_id) {
+            return delegate;
+        }
+
+        let (mut choosen, mut matched) = (INVALID_ID, 0);
+        for id in members {
+            let pr = prs.get(*id).unwrap();
+            if pr.can_be_delegate() && matched < pr.matched {
+                choosen = *id;
+                matched = pr.matched;
+            }
+        }
+        if choosen != INVALID_ID {
+            self.groups.set_delegate(group_id, choosen);
+        } else if choosen == to {
+            return INVALID_ID;
+        }
+        choosen
     }
 }

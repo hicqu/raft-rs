@@ -48,11 +48,7 @@ impl Interface {
     /// Read messages out of the raft.
     pub fn read_messages(&mut self) -> Vec<Message> {
         match self.raft {
-            Some(_) => {
-                let mut msgs = self.msgs.drain(..).collect::<Vec<_>>();
-                msgs.extend(self.groups.take_messages());
-                msgs
-            }
+            Some(_) => self.msgs.drain(..).collect(),
             None => vec![],
         }
     }

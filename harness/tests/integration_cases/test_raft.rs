@@ -127,7 +127,10 @@ fn next_ents(r: &mut Raft<MemStorage>, s: &MemStorage) -> Vec<Entry> {
 
 fn do_send_append(raft: &mut Raft<MemStorage>, to: u64) {
     let mut prs = raft.take_prs();
-    raft.send_append(to, &mut prs);
+    {
+        let pr = prs.get_mut(to).unwrap();
+        raft.send_append(to, pr);
+    }
     raft.set_prs(prs);
 }
 
@@ -1360,7 +1363,7 @@ fn test_msg_append_response_wait_reset() {
 
     // The new leader has just emitted a new Term 4 entry; consume those messages
     // from the outgoing queue.
-    sm.bcast_append(None);
+    sm.bcast_append();
     sm.read_messages();
 
     // Node 2 acks the first entry, making it committed.
