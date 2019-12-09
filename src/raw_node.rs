@@ -30,7 +30,6 @@ use crate::eraftpb::{
     Snapshot,
 };
 use crate::errors::{Error, Result};
-use crate::group::{Groups, GroupsConfig};
 use crate::read_only::ReadState;
 use crate::{Raft, SoftState, Status, StatusRef, Storage, INVALID_ID};
 use slog::Logger;
@@ -516,10 +515,9 @@ impl<T: Storage> RawNode<T> {
 
     /// Update raft groups config for Follower Replication in flight
     #[inline]
-    pub fn update_groups_config(&mut self, config: GroupsConfig) {
-        let groups = Groups::new(config);
+    pub fn update_groups_config(&mut self, config: Vec<(u64, Vec<u64>)>) {
         // The delegate cache will be removed
-        self.raft.set_groups(groups);
+        self.raft.set_groups(config);
     }
 }
 

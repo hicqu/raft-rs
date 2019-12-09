@@ -18,38 +18,7 @@
 //! # Follower Replication
 //! See https://github.com/tikv/rfcs/pull/33
 
-use std::collections::hash_map::Iter;
 use std::collections::HashMap;
-use std::iter::FromIterator;
-
-/// Configuration for distribution of raft nodes in groups.
-/// For the inner hashmap, the key is group ID and value is the group members.
-#[derive(Clone, Debug)]
-pub struct GroupsConfig {
-    inner: HashMap<u64, Vec<u64>>,
-}
-
-impl GroupsConfig {
-    /// Create a new GroupsConfig
-    pub fn new(config: Vec<(u64, Vec<u64>)>) -> Self {
-        let inner = HashMap::from_iter(config.into_iter());
-        Self { inner }
-    }
-
-    /// Return a iterator with inner group ID - group members pairs
-    #[inline]
-    pub fn iter(&self) -> Iter<'_, u64, Vec<u64>> {
-        self.inner.iter()
-    }
-}
-
-impl Default for GroupsConfig {
-    fn default() -> Self {
-        Self {
-            inner: HashMap::new(),
-        }
-    }
-}
 
 /// Maintain all the groups info in Follower Replication
 ///
@@ -59,9 +28,6 @@ impl Default for GroupsConfig {
 ///
 #[derive(Debug, Clone, Default)]
 pub struct Groups {
-    // group id => sorted node ids
-    groups: HashMap<u64, Vec<u64>>,
-
     // node id => group id
     indexes: HashMap<u64, u64>,
 
@@ -71,18 +37,15 @@ pub struct Groups {
 
 impl Groups {
     /// Create new Groups with given configuration
-    pub fn new(meta: GroupsConfig) -> Self {
-        let mut groups = meta.inner;
+    pub fn new(config: Vec<(u64, Vec<u64>)>) -> Self {
         let mut indexes = HashMap::new();
-        for (group_id, ref mut group) in groups.iter_mut() {
-            group.sort();
-            for id in group.iter() {
-                indexes.insert(*id, *group_id);
+        for (group_id, members) in config {
+            for id in members {
+                indexes.insert(id, group_id);
             }
         }
 
         Self {
-            groups,
             indexes,
             ..Default::default()
         }
@@ -90,11 +53,22 @@ impl Groups {
 
     /// Get group members by group id.
     #[inline]
-    pub fn get_members(&self, group_id: u64) -> &[u64] {
-        self.groups.get(&group_id).unwrap().as_ref()
+    pub fn get_members(&self, group_id: u64) -> Vec<u64> {
+        self.indexes
+            .iter()
+            .filter_map(
+                |(node, gid)| {
+                    if *gid == group_id {
+                        Some(*node)
+                    } else {
+                        None
+                    }
+                },
+            )
+            .collect::<Vec<_>>()
     }
 
-    /// Get group id by member id.
+    /// Get group id by member id
     #[inline]
     pub fn get_group_id(&self, member: u64) -> Option<u64> {
         self.indexes.get(&member).cloned()
@@ -125,18 +99,8 @@ impl Groups {
         self.delegate_cache.get(&group).cloned()
     }
 
-    /// Return the delegate for a group by node id
-    #[inline]
-    pub fn get_delegate_by_member(&self, member: u64) -> Option<u64> {
-        self.get_group_id(member)
-            .and_then(|group| self.get_delegate(group))
-    }
-
-    /// Whether the two nodes are in the same group
-    #[inline]
-    pub fn in_same_group(&self, a: u64, b: u64) -> bool {
-        let ga = self.get_group_id(a);
-        let gb = self.get_group_id(b);
-        ga.is_some() && ga == gb
+    /// Update given `peer`'s group ID
+    pub fn update_group_id(&mut self, peer: u64, group_id: u64) {
+        let _ = self.indexes.insert(peer, group_id);
     }
 }

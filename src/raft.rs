@@ -974,6 +974,9 @@ impl<T: Storage> Raft<T> {
     /// Steps the raft along via a message. This should be called everytime your raft receives a
     /// message from a peer.
     pub fn step(&mut self, m: Message) -> Result<()> {
+        if m.get_msg_type() != MessageType::MsgHup && m.get_group_id() != INVALID_ID {
+            self.groups.update_group_id(m.from, m.get_group_id())
+        }
         // Handle the message term, which may result in our stepping down to a follower.
         if m.term == 0 {
             // local message
@@ -1647,7 +1650,7 @@ impl<T: Storage> Raft<T> {
         let mut old_paused = false;
         let mut more_to_send = vec![];
         self.check_message_with_progress(
-            &mut m,
+            &m,
             &mut send_append,
             &mut old_paused,
             &mut maybe_commit,
@@ -1908,7 +1911,7 @@ impl<T: Storage> Raft<T> {
     }
 
     /// For a given message, append the entries to the log.
-    fn handle_append_message(&mut self, mut m: Message) {
+    pub fn handle_append_message(&mut self, mut m: Message) {
         if self.pending_request_snapshot != INVALID_INDEX {
             self.send_request_snapshot();
             return;
@@ -2230,7 +2233,8 @@ impl<T: Storage> Raft<T> {
     }
 
     /// Sets the `Groups`.
-    pub fn set_groups(&mut self, groups: Groups) {
+    pub fn set_groups(&mut self, groups: Vec<(u64, Vec<u64>)>) {
+        let groups = Groups::new(groups);
         self.groups = groups
     }
 
@@ -2383,9 +2387,9 @@ impl<T: Storage> Raft<T> {
 
         let (mut choosen, mut matched) = (INVALID_ID, 0);
         for id in members {
-            let pr = prs.get(*id).unwrap();
+            let pr = prs.get(id).unwrap();
             if pr.can_be_delegate() && matched < pr.matched {
-                choosen = *id;
+                choosen = id;
                 matched = pr.matched;
             }
         }

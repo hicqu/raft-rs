@@ -472,7 +472,7 @@ macro_rules! fatal {
 
 mod config;
 mod errors;
-pub mod group;
+mod group;
 mod log_unstable;
 mod progress;
 #[cfg(test)]
@@ -488,7 +488,6 @@ pub mod util;
 
 pub use self::config::Config;
 pub use self::errors::{Error, Result, StorageError};
-pub use self::group::GroupsConfig;
 pub use self::log_unstable::Unstable;
 pub use self::progress::inflights::Inflights;
 pub use self::progress::progress_set::{majority, Configuration, ProgressSet};
@@ -528,8 +527,6 @@ pub mod prelude {
     pub use crate::status::{Status, StatusRef};
 
     pub use crate::read_only::{ReadOnlyOption, ReadState};
-
-    pub use crate::group::GroupsConfig;
 }
 
 /// The default logger we fall back to when passed `None` in external facing constructors.

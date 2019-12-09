@@ -14,7 +14,6 @@
 use crate::test_util::*;
 use harness::{Interface, Network};
 use raft::eraftpb::*;
-use raft::group::{Groups, GroupsConfig};
 use raft::storage::MemStorage;
 use raft::*;
 use rand::Rng;
@@ -94,7 +93,7 @@ impl Sandbox {
         let c = new_test_config(leader, 10, 1);
         let storage = new_storage(peers.clone(), snapshot_index, last_index - 1);
         let mut leader_node = Interface::new(Raft::new(&c, storage, l).unwrap());
-        leader_node.set_groups(Groups::new(GroupsConfig::new(group_config)));
+        leader_node.set_groups(group_config);
         leader_node.become_candidate();
         leader_node.become_leader();
         let entries = leader_node.raft_log.all_entries();
@@ -400,7 +399,6 @@ fn test_delegate_reject_broadcast() {
     let m = msgs.pop().unwrap();
     assert_eq!(2, m.to);
     let pr_peer4 = sandbox.leader().prs().get(4).unwrap();
-    assert_eq!(ProgressState::Delegated, pr_peer4.state);
     assert_eq!(
         sandbox.last_index + 2,
         pr_peer4.next_idx,
