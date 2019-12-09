@@ -85,7 +85,7 @@ message Message {
     // The targets to send raft logs through the delegate
     repeated uint64 bcast_targets = 16;
     // Whether the message comes from a delegate actually
-    uint64 from_delegate = 17;
+    uint64 delegate = 17;
 }
 
 message HardState {

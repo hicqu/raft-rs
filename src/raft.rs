@@ -539,8 +539,11 @@ impl<T: Storage> Raft<T> {
         }
         let mut m = Message::default();
         if self.leader_id != self.id {
-            // For delegates.
-            m.from_delegate = self.id;
+            // Self is a delegate, bring the leader id to the other member
+            // TODO: This should be safe as the delegate just calls `handle_append_message` which
+            // means it calls `become_follower`. Is that true?
+            m.from = self.leader_id;
+            m.delegate = self.id;
         }
         m.to = to;
 
@@ -625,7 +628,8 @@ impl<T: Storage> Raft<T> {
                 // If no delegate is picked, the leader `send_append` itself
                 // If we do pick a delegate, `send_append` first
                 if delegate == INVALID_ID || id == delegate {
-                    self.send_append(id, prs.get_mut(id).unwrap());
+                    let pr = prs.get_mut(id).unwrap();
+                    self.send_append(id, pr);
                     return None;
                 }
                 Some((id, delegate))
@@ -642,6 +646,7 @@ impl<T: Storage> Raft<T> {
                     continue 'LOOP;
                 }
             }
+            // If the delegate is paused, send a empty message
             let mut m = Message::default();
             self.prepare_send_entries(&mut m, prs.get_mut(delegate).unwrap(), vec![]);
             m.mut_bcast_targets().push(id);
@@ -1671,7 +1676,8 @@ impl<T: Storage> Raft<T> {
             }
         }
 
-        if send_append && m.from_delegate == 0 {
+        // The leader receives the reject message from a delegate
+        if send_append && m.delegate != INVALID_ID {
             let mut prs = self.take_prs();
             self.send_append_with_bcast_targets(
                 m.from,
@@ -1959,12 +1965,11 @@ impl<T: Storage> Raft<T> {
             .maybe_append(m.index, m.log_term, m.commit, &m.entries)
         {
             to_send.set_index(last_idx);
-            if m.from_delegate != INVALID_ID {
-                // TODO(qupeng): in responses `from_delegate` indicates the entries come from delegates.
-                // Maybe we need to rename the field.
-                to_send.from_delegate = m.from_delegate;
+            if m.delegate != INVALID_ID {
+                // Follower receives the message from a delegate, send response back to the delegate
+                to_send.delegate = m.delegate;
                 let mut to_delegate = to_send.clone();
-                to_delegate.to = m.from_delegate;
+                to_delegate.to = m.delegate;
                 self.send(to_delegate);
             }
             true
@@ -1979,6 +1984,10 @@ impl<T: Storage> Raft<T> {
                 "index" => m.index,
                 "logterm" => ?self.raft_log.term(m.index),
             );
+            if m.delegate != INVALID_ID {
+                // Follower only sends rejection to the delegate
+                to_send.to = m.delegate;
+            }
             to_send.index = m.index;
             to_send.reject = true;
             to_send.reject_hint = self.raft_log.last_index();
@@ -2018,10 +2027,24 @@ impl<T: Storage> Raft<T> {
                 snapshot_term = sterm;
             );
             to_send.index = self.raft_log.last_index();
-            if m.from_delegate != INVALID_ID {
+            if m.delegate != INVALID_ID {
                 let mut to_delegate = to_send.clone();
-                to_delegate.to = m.from_delegate;
+                to_delegate.to = m.delegate;
                 self.send(to_delegate);
+            }
+            if !m.get_bcast_targets().is_empty() {
+                let mut prs = self.take_prs();
+                for member in m.take_bcast_targets() {
+                    let mut to_member = Message::default();
+                    to_member.from = m.from;
+                    to_member.to = member;
+                    // The unwrap is safe as the delegate just applies the snapshot
+                    let pr = prs.get_mut(member).unwrap();
+                    if self.prepare_send_snapshot(&mut to_member, pr, member) {
+                        self.send(to_member);
+                    }
+                }
+                self.set_prs(prs)
             }
         } else {
             info!(
@@ -2381,6 +2404,7 @@ impl<T: Storage> Raft<T> {
     // The delegate must satisfy conditions below:
     // 1. The progress state should be `ProgressState::Replicate`;
     // 2. The progress has biggest `match`;
+    // If all the members are requiring snapshots, use given `to`.
     fn pick_delegate(&mut self, to: u64, prs: &ProgressSet) -> u64 {
         if !self.is_leader() {
             // Only leader can pick a delegate
@@ -2390,22 +2414,39 @@ impl<T: Storage> Raft<T> {
             Some(gid) => gid,
             None => return INVALID_ID,
         };
+
+        // Check cache first
+        if let Some(delegate) = self.groups.get_delegate(group_id) {
+            let pr = prs.get(delegate).unwrap();
+            if pr.require_snapshot(&self.raft_log) {
+                return INVALID_ID;
+            }
+            return delegate;
+        }
+
+        // In a stable cluster, the process starting from below should be accessed infrequently
+
         let members = self.groups.get_members(group_id);
         if members.len() <= 1 || self.group_id == group_id {
             return INVALID_ID;
         }
 
-        if let Some(delegate) = self.groups.get_delegate(group_id) {
-            return delegate;
-        }
-
-        let (mut chosen, mut matched) = (INVALID_ID, 0);
+        let (mut chosen, mut matched, mut to_send_snapshot, size) =
+            (INVALID_ID, 0, Vec::new(), members.len());
         for id in members {
             let pr = prs.get(id).unwrap();
-            if pr.can_be_delegate() && matched < pr.matched {
+            if pr.require_snapshot(&self.raft_log) {
+                to_send_snapshot.push(id);
+            } else if pr.state == ProgressState::Replicate
+                && matched < pr.matched
+                && self.pending_request_snapshot == INVALID_INDEX
+            {
                 chosen = id;
                 matched = pr.matched;
             }
+        }
+        if chosen == INVALID_ID && to_send_snapshot.len() == size {
+            chosen = to;
         }
         if chosen != INVALID_ID {
             self.groups.set_delegate(group_id, chosen);
