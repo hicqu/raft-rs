@@ -273,13 +273,13 @@ fn test_pick_group_delegate() {
         ),
     ];
     for (expected_delegate, expected_msg_type, input) in tests {
-        let mut sandbox = Sandbox::new(&l, 1, input, group_config.clone(), 5, 10);
+        let mut sandbox = Sandbox::new(&l, 1, input.clone(), group_config.clone(), 5, 10);
         sandbox
             .network
             .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
             .expect("");
         let mut msgs = sandbox.leader_mut().read_messages();
-        assert_eq!(1, msgs.len(), "Should only send one msg");
+        assert_eq!(1, msgs.len(), "Should only send one msg: {:?}", input);
         let m = msgs.pop().unwrap();
         assert_eq!(
             m.msg_type, expected_msg_type,

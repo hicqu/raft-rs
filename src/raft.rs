@@ -176,7 +176,7 @@ pub struct Raft<T: Storage> {
     max_election_timeout: usize,
 
     /// Raft groups inner state
-    pub groups: Groups,
+    groups: Groups,
     group_id: u64,
 
     /// The logger for the raft structure.
@@ -622,7 +622,9 @@ impl<T: Storage> Raft<T> {
             .into_iter()
             .filter_map(|(id, _)| {
                 let delegate = self.pick_delegate(id, &prs);
-                if delegate == INVALID_ID {
+                // If no delegate is picked, the leader `send_append` itself
+                // If we do pick a delegate, `send_append` first
+                if delegate == INVALID_ID || id == delegate {
                     self.send_append(id, prs.get_mut(id).unwrap());
                     return None;
                 }
@@ -632,7 +634,10 @@ impl<T: Storage> Raft<T> {
 
         'LOOP: for (id, delegate) in targets {
             for m in &mut self.msgs[old_msg_len..] {
-                if m.get_msg_type() == MessageType::MsgAppend && m.get_to() == delegate {
+                let mtype = m.get_msg_type();
+                if (mtype == MessageType::MsgAppend || mtype == MessageType::MsgSnapshot)
+                    && m.get_to() == delegate
+                {
                     m.mut_bcast_targets().push(id);
                     continue 'LOOP;
                 }
@@ -974,7 +979,7 @@ impl<T: Storage> Raft<T> {
     /// Steps the raft along via a message. This should be called everytime your raft receives a
     /// message from a peer.
     pub fn step(&mut self, m: Message) -> Result<()> {
-        if m.get_msg_type() != MessageType::MsgHup && m.get_group_id() != INVALID_ID {
+        if is_local_msg(m.get_msg_type()) && m.get_group_id() != INVALID_ID {
             self.groups.update_group_id(m.from, m.get_group_id())
         }
         // Handle the message term, which may result in our stepping down to a follower.
@@ -1463,8 +1468,6 @@ impl<T: Storage> Raft<T> {
         // If snapshot failure, wait for a heartbeat interval before next try
         pr.pause();
         pr.pending_request_snapshot = INVALID_INDEX;
-        // Remove the delegate as it's paused now
-        self.groups.remove_delegate(m.from);
     }
 
     /// Check message's progress to decide which action should be taken.
@@ -1935,6 +1938,7 @@ impl<T: Storage> Raft<T> {
             self.send(to_send);
             let mut prs = self.take_prs();
             for target in m.take_bcast_targets() {
+                // Self is delegate, sync raft logs to other members
                 if let Some(pr) = prs.get_mut(target) {
                     pr.reset_on_delegate(self.raft_log.last_index() + 1);
                     self.send_append(target, pr);
@@ -1947,6 +1951,7 @@ impl<T: Storage> Raft<T> {
         }
     }
 
+    // Return false when rejecting the append message.
     fn handle_append_entries(&mut self, m: &Message, to_send: &mut Message) -> bool {
         debug_assert!(m.log_term != 0, "{:?} log term can't be 0", m);
         if let Some((_, last_idx)) = self
@@ -2235,7 +2240,10 @@ impl<T: Storage> Raft<T> {
     /// Sets the `Groups`.
     pub fn set_groups(&mut self, groups: Vec<(u64, Vec<u64>)>) {
         let groups = Groups::new(groups);
-        self.groups = groups
+        if let Some(gid) = groups.get_group_id(self.id) {
+            self.group_id = gid;
+        }
+        self.groups = groups;
     }
 
     /// Takes the progress set (destructively turns to `None`).
@@ -2362,13 +2370,15 @@ impl<T: Storage> Raft<T> {
         );
     }
 
-    // Pick a delegate of the given group
+    // Pick a delegate of the given peer. If returning a INVALID_ID, the leader will
+    // `send_append` itself.
     //
     // The delegate must satisfy conditions below:
     // 1. The progress state should be `ProgressState::Replicate`;
     // 2. The progress has biggest `match`;
     fn pick_delegate(&mut self, to: u64, prs: &ProgressSet) -> u64 {
         if !self.is_leader() {
+            // Only leader can pick a delegate
             return INVALID_ID;
         }
         let group_id = match self.groups.get_group_id(to) {
@@ -2384,19 +2394,28 @@ impl<T: Storage> Raft<T> {
             return delegate;
         }
 
-        let (mut choosen, mut matched) = (INVALID_ID, 0);
+        let (mut chosen, mut matched) = (INVALID_ID, 0);
         for id in members {
             let pr = prs.get(id).unwrap();
             if pr.can_be_delegate() && matched < pr.matched {
-                choosen = id;
+                chosen = id;
                 matched = pr.matched;
             }
         }
-        if choosen != INVALID_ID {
-            self.groups.set_delegate(group_id, choosen);
-        } else if choosen == to {
-            return INVALID_ID;
+        if chosen != INVALID_ID {
+            self.groups.set_delegate(group_id, chosen);
         }
-        choosen
+        chosen
+    }
+}
+
+pub(crate) fn is_local_msg(t: MessageType) -> bool {
+    match t {
+        MessageType::MsgHup
+        | MessageType::MsgBeat
+        | MessageType::MsgUnreachable
+        | MessageType::MsgSnapStatus
+        | MessageType::MsgCheckQuorum => true,
+        _ => false,
     }
 }

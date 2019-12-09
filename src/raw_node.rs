@@ -30,6 +30,7 @@ use crate::eraftpb::{
     Snapshot,
 };
 use crate::errors::{Error, Result};
+use crate::raft::is_local_msg;
 use crate::read_only::ReadState;
 use crate::{Raft, SoftState, Status, StatusRef, Storage, INVALID_ID};
 use slog::Logger;
@@ -51,17 +52,6 @@ pub enum SnapshotStatus {
     Finish,
     /// Indicates that the snapshot failed to build or is not ready.
     Failure,
-}
-
-fn is_local_msg(t: MessageType) -> bool {
-    match t {
-        MessageType::MsgHup
-        | MessageType::MsgBeat
-        | MessageType::MsgUnreachable
-        | MessageType::MsgSnapStatus
-        | MessageType::MsgCheckQuorum => true,
-        _ => false,
-    }
 }
 
 fn is_response_msg(t: MessageType) -> bool {
