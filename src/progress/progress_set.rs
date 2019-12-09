@@ -427,9 +427,13 @@ impl ProgressSet {
     /// Doing this will set the `recent_active` of each peer to false.
     ///
     /// This should only be called by the leader.
-    pub fn quorum_recently_active(&mut self, perspective_of: u64) -> bool {
+    pub fn quorum_recently_active<F>(&mut self, perspective_of: u64, mut f: F) -> bool
+    where
+        F: FnMut(u64, bool),
+    {
         let mut active = HashSet::default();
         for (&id, pr) in self.voters_mut() {
+            f(id, pr.recent_active);
             if id == perspective_of {
                 active.insert(id);
                 continue;

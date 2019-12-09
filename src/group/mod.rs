@@ -98,4 +98,15 @@ impl Groups {
     pub fn update_group_id(&mut self, peer: u64, group_id: u64) {
         let _ = self.indexes.insert(peer, group_id);
     }
+
+    pub(crate) fn check_pr_active(&mut self, id: u64, active: bool) {
+        if !active {
+            // Remove the peer from the group because it's not active.
+            if let Some(gid) = self.indexes.remove(&id) {
+                if self.delegate_cache.get(&gid) == Some(&id) {
+                    self.delegate_cache.remove(&gid);
+                }
+            }
+        }
+    }
 }

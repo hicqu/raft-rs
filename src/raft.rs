@@ -2312,7 +2312,12 @@ impl<T: Storage> Raft<T> {
     // check_quorum_active can only called by leader.
     fn check_quorum_active(&mut self) -> bool {
         let self_id = self.id;
-        self.mut_prs().quorum_recently_active(self_id)
+        let mut prs = self.take_prs();
+        let res = prs.quorum_recently_active(self_id, |id, active| {
+            self.groups.check_pr_active(id, active)
+        });
+        self.set_prs(prs);
+        res
     }
 
     /// Issues a message to timeout immediately.
