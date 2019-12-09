@@ -52,7 +52,6 @@ impl Groups {
     }
 
     /// Get group members by group id.
-    #[inline]
     pub fn get_members(&self, group_id: u64) -> Vec<u64> {
         self.indexes
             .iter()
@@ -69,19 +68,16 @@ impl Groups {
     }
 
     /// Get group id by member id
-    #[inline]
     pub fn get_group_id(&self, member: u64) -> Option<u64> {
         self.indexes.get(&member).cloned()
     }
 
     /// Set delegate for a group. The delegate must be in the group.
-    #[inline]
     pub fn set_delegate(&mut self, group_id: u64, delegate: u64) {
         self.delegate_cache.insert(group_id, delegate);
     }
 
     /// Unset the delegate by delegate id.
-    #[inline]
     pub fn remove_delegate(&mut self, delegate: u64) {
         if let Some(group_id) = self.get_group_id(delegate) {
             match self.delegate_cache.get(&group_id) {
@@ -94,7 +90,6 @@ impl Groups {
     }
 
     /// Return the delegate for a group by group id
-    #[inline]
     pub fn get_delegate(&self, group: u64) -> Option<u64> {
         self.delegate_cache.get(&group).cloned()
     }

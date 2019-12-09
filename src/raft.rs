@@ -2336,7 +2336,6 @@ impl<T: Storage> Raft<T> {
         m
     }
 
-    #[inline]
     fn pr_become_snapshot_and_log(
         &self,
         id: u64,
