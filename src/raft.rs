@@ -17,7 +17,7 @@
 use crate::eraftpb::{Entry, EntryType, HardState, Message, MessageType, Snapshot};
 use rand::{self, Rng};
 use slog::{self, Logger};
-use std::{cmp, mem};
+use std::cmp;
 
 use super::errors::{Error, Result, StorageError};
 use super::group::Groups;
@@ -175,9 +175,10 @@ pub struct Raft<T: Storage> {
     min_election_timeout: usize,
     max_election_timeout: usize,
 
-    /// Raft groups inner state
+    // Raft groups inner state
     groups: Groups,
-    group_id: u64,
+    /// The group ID of this node
+    pub group_id: u64,
 
     /// The logger for the raft structure.
     pub(crate) logger: slog::Logger,
@@ -486,7 +487,7 @@ impl<T: Storage> Raft<T> {
         }
         let (sindex, sterm) = (snapshot.get_metadata().index, snapshot.get_metadata().term);
         m.set_snapshot(snapshot);
-        self.pr_become_snapshot_and_log(to, pr, sindex, sterm);
+        self.pr_become_snapshot(to, pr, sindex, sterm);
         true
     }
 
@@ -540,8 +541,8 @@ impl<T: Storage> Raft<T> {
         let mut m = Message::default();
         if self.leader_id != self.id {
             // Self is a delegate, bring the leader id to the other member
-            // TODO: This should be safe as the delegate just calls `handle_append_message` which
-            // means it calls `become_follower`. Is that true?
+            // This should be safe as the delegate just calls `handle_append_message` which
+            // means it calls `become_follower`.
             m.from = self.leader_id;
             m.delegate = self.id;
         }
@@ -578,8 +579,11 @@ impl<T: Storage> Raft<T> {
         if new_msg_len > old_msg_len {
             self.msgs[old_msg_len].set_bcast_targets(targets);
         } else {
-            // TODO(qupeng): is it possible? Remove it later.
-            fatal!(self.logger, "should be impossible in send_append_with_bcast_targets");
+            fatal!(
+                self.logger,
+                "the progress {to} should never be paused in 'send_append_with_bcast_targets'",
+                to = to
+            );
         }
     }
 
@@ -602,7 +606,7 @@ impl<T: Storage> Raft<T> {
         self.send(m);
     }
 
-    /// Sends RPC, with entries to all or given peers that are not up-to-date
+    /// Sends RPC, with entries to all peers that are not up-to-date
     /// according to the progress recorded in r.prs().
     pub fn bcast_append(&mut self) {
         let self_id = self.id;
@@ -1675,11 +1679,11 @@ impl<T: Storage> Raft<T> {
             }
         }
 
-        // The leader receives the reject message from a delegate
         if send_append {
             let from = m.from;
             let mut prs = self.take_prs();
             if m.delegate != INVALID_ID {
+                // The leader receives the reject message from a delegate
                 self.send_append_with_bcast_targets(
                     from,
                     prs.get_mut(from).unwrap(),
@@ -2257,11 +2261,6 @@ impl<T: Storage> Raft<T> {
         }
     }
 
-    /// Takes the `Groups`.
-    pub fn take_groups(&mut self) -> Groups {
-        mem::replace(&mut self.groups, Groups::default())
-    }
-
     /// Sets the `Groups`.
     pub fn set_groups(&mut self, groups: Vec<(u64, Vec<u64>)>) {
         let groups = Groups::new(groups);
@@ -2374,7 +2373,7 @@ impl<T: Storage> Raft<T> {
         m
     }
 
-    fn pr_become_snapshot_and_log(
+    fn pr_become_snapshot(
         &self,
         id: u64,
         progress: &mut Progress,
