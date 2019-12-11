@@ -389,22 +389,16 @@ fn test_delegate_reject_broadcast() {
         (4, FollowerScenario::NeedEntries(12)),
     ];
     let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 20);
-    sandbox.leader_mut().mut_prs().get_mut(2).unwrap().next_idx = 10; // make a conflict next_idx
+    sandbox.leader_mut().mut_prs().get_mut(4).unwrap().next_idx = 15; // make a conflict next_idx
     sandbox
         .network
         .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
         .expect("");
     let mut msgs = sandbox.leader_mut().read_messages();
     let m = msgs.pop().unwrap();
-    assert_eq!(2, m.to);
-    let pr_peer4 = sandbox.leader().prs().get(4).unwrap();
-    assert_eq!(
-        sandbox.last_index + 2,
-        pr_peer4.next_idx,
-        "The progress of members should be updated when using delegate"
-    );
+    assert_eq!(4, m.to);
     sandbox.network.dispatch(vec![m]).expect("");
-    let mut msgs = sandbox.get_mut(2).read_messages();
+    let mut msgs = sandbox.get_mut(4).read_messages();
     assert_eq!(1, msgs.len());
     let m = msgs.pop().unwrap();
     assert_eq!(MessageType::MsgAppendResponse, m.msg_type);
@@ -413,11 +407,14 @@ fn test_delegate_reject_broadcast() {
     assert_eq!(
         2,
         m.get_bcast_targets().len(),
-        "If a delegate rejects broadcasting, it should send back all the commissions to the leader"
+        "If a delegate rejects broadcasting, it should send back all the `bcast_targets` to the leader"
     );
     sandbox.network.dispatch(vec![m]).expect("");
-    // Delegate(peer 2) of group 1 should be repicked
-    assert_eq!(Some(4), sandbox.leader().groups().get_delegate(1));
+    assert_eq!(
+        Some(4),
+        sandbox.leader().groups().get_delegate(1),
+        "The delegate won't be dismissed when rejecting MsgAppend"
+    );
     let mut msgs = sandbox.leader_mut().read_messages();
     assert_eq!(1, msgs.len());
     let m = msgs.pop().unwrap();
@@ -427,42 +424,51 @@ fn test_delegate_reject_broadcast() {
     sandbox.assert_final_state();
 }
 
-// test_send_append_use_delegate ensures that the leader picks a delegate to send entries if it receives a rejection from the follower.
 #[test]
-fn test_send_append_use_delegate() {
+fn test_follower_only_send_reject_to_delegate() {
     let l = default_logger();
-    let group_config = vec![(2, vec![1]), (1, vec![2, 3, 4])];
+    let group_config = vec![(2, vec![1]), (1, vec![2, 3])];
     let followers = vec![
-        (2, FollowerScenario::NeedEntries(7)),
-        (3, FollowerScenario::Snapshot),
-        (4, FollowerScenario::NeedEntries(10)),
+        (2, FollowerScenario::NeedEntries(10)),
+        (3, FollowerScenario::NeedEntries(7)),
     ];
     let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 20);
-    // Make a conflict next_idx in peer 2 so that `maybe_decr_to` can work.
-    sandbox.leader_mut().mut_prs().get_mut(2).unwrap().next_idx = 21;
-    let mut m = new_message(2, 1, MessageType::MsgAppendResponse, 0);
-    m.index = 21;
-    m.reject = true;
-    m.reject_hint = 9; // make node2's match_idx to 9
-    sandbox.network.dispatch(vec![m]).expect("");
+    sandbox
+        .network
+        .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
+        .expect("");
     let msgs = sandbox.leader_mut().read_messages();
-    // Pick peer 4 as the delegate
-    assert_eq!(Some(4), sandbox.leader().groups().get_delegate(1));
-    assert_eq!(1, msgs.len());
-    let m = &msgs[0];
-    assert_eq!(m.msg_type, MessageType::MsgAppend);
-    assert_eq!(4, m.to);
-    assert_eq!(1, m.get_bcast_targets().len());
-    let targets = m.get_bcast_targets();
-    assert_eq!(vec![2], targets);
-    sandbox.network.send(msgs);
-    assert_eq!(
-        sandbox.network.peers.get(&2).unwrap().raft_log.last_index(),
-        sandbox.last_index,
-    );
+    // Pick peer 2 as the delegate
+    assert_eq!(Some(2), sandbox.leader().groups().get_delegate(1));
+    sandbox.network.dispatch(msgs).expect("");
+    let mut msgs = sandbox.get_mut(2).read_messages();
+    // MsgAppendResponse to 1 and MsgAppend to 3
+    // We only care about the latter
+    assert_eq!(msgs.len(), 2);
+    let m = msgs.remove(1);
+    assert_eq!(m.get_msg_type(), MessageType::MsgAppend);
+    assert_eq!(m.to, 3);
+    assert_eq!(m.from, 1);
+    assert_eq!(m.delegate, 2);
+    sandbox.network.dispatch(vec![m]).expect("");
+    let mut msgs = sandbox.get_mut(3).read_messages();
+    assert_eq!(msgs.len(), 1);
+    let m = msgs.pop().unwrap();
+    assert_eq!(m.to, 2);
+    assert!(m.reject);
 }
 
 #[test]
 fn test_send_empty_msg_when_paused() {
+    // TODO
+}
+
+#[test]
+fn test_dismiss_delegate_when_not_active() {
+    // TODO
+}
+
+#[test]
+fn test_update_group_by_group_id_in_message() {
     // TODO
 }

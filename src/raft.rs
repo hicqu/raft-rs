@@ -579,7 +579,7 @@ impl<T: Storage> Raft<T> {
             self.msgs[old_msg_len].set_bcast_targets(targets);
         } else {
             // TODO(qupeng): is it possible? Remove it later.
-            panic!("should be impossible in send_append_with_bcast_targets");
+            fatal!(self.logger, "should be impossible in send_append_with_bcast_targets");
         }
     }
 
@@ -628,8 +628,7 @@ impl<T: Storage> Raft<T> {
                 // If no delegate is picked, the leader `send_append` itself
                 // If we do pick a delegate, `send_append` first
                 if delegate == INVALID_ID || id == delegate {
-                    let pr = prs.get_mut(id).unwrap();
-                    self.send_append(id, pr);
+                    self.send_append(id, prs.get_mut(id).unwrap());
                     return None;
                 }
                 Some((id, delegate))
@@ -984,7 +983,7 @@ impl<T: Storage> Raft<T> {
     /// Steps the raft along via a message. This should be called everytime your raft receives a
     /// message from a peer.
     pub fn step(&mut self, m: Message) -> Result<()> {
-        if is_local_msg(m.get_msg_type()) && m.get_group_id() != INVALID_ID {
+        if !is_local_msg(m.get_msg_type()) && m.get_group_id() != INVALID_ID {
             self.groups.update_group_id(m.from, m.get_group_id())
         }
         // Handle the message term, which may result in our stepping down to a follower.
@@ -1677,13 +1676,18 @@ impl<T: Storage> Raft<T> {
         }
 
         // The leader receives the reject message from a delegate
-        if send_append && m.delegate != INVALID_ID {
+        if send_append {
+            let from = m.from;
             let mut prs = self.take_prs();
-            self.send_append_with_bcast_targets(
-                m.from,
-                prs.get_mut(m.from).unwrap(),
-                m.take_bcast_targets(),
-            );
+            if m.delegate != INVALID_ID {
+                self.send_append_with_bcast_targets(
+                    from,
+                    prs.get_mut(from).unwrap(),
+                    m.take_bcast_targets(),
+                );
+            } else {
+                self.send_append(from, prs.get_mut(from).unwrap());
+            }
             self.set_prs(prs);
         }
 
@@ -1691,10 +1695,6 @@ impl<T: Storage> Raft<T> {
             for to_send in more_to_send.drain(..) {
                 self.send(to_send);
             }
-        }
-
-        if !self.prs().get(m.from).unwrap().can_be_delegate() {
-            self.groups.remove_delegate(m.from);
         }
 
         Ok(())
@@ -1939,7 +1939,9 @@ impl<T: Storage> Raft<T> {
             self.send(to_send);
             return;
         }
-
+        if !m.get_bcast_targets().is_empty() {
+            to_send.delegate = self.id;
+        }
         if self.handle_append_entries(&m, &mut to_send) {
             self.send(to_send);
             let mut prs = self.take_prs();
@@ -2437,10 +2439,7 @@ impl<T: Storage> Raft<T> {
             let pr = prs.get(id).unwrap();
             if pr.require_snapshot(&self.raft_log) {
                 to_send_snapshot.push(id);
-            } else if pr.state == ProgressState::Replicate
-                && matched < pr.matched
-                && self.pending_request_snapshot == INVALID_INDEX
-            {
+            } else if pr.can_be_delegate() && matched < pr.matched {
                 chosen = id;
                 matched = pr.matched;
             }
