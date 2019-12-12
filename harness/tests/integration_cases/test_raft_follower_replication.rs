@@ -16,7 +16,6 @@ use harness::{Interface, Network};
 use raft::eraftpb::*;
 use raft::storage::MemStorage;
 use raft::*;
-use rand::Rng;
 use slog::Logger;
 use std::collections::HashSet;
 use std::iter::FromIterator;
@@ -97,6 +96,7 @@ impl Sandbox {
         leader_node.become_candidate();
         leader_node.become_leader();
         let entries = leader_node.raft_log.all_entries();
+        let mut prs = leader_node.take_prs();
         let mut interfaces = followers
             .clone()
             .drain(..)
@@ -110,7 +110,7 @@ impl Sandbox {
                 if scenario != FollowerScenario::Snapshot {
                     Self::assert_entries_consistent(entries.clone(), node_entries);
                 }
-                let mut pr = leader_node.mut_prs().get_mut(id).unwrap();
+                let mut pr = prs.get_mut(id).unwrap();
                 pr.state = match scenario {
                     FollowerScenario::NeedEntries(_) | FollowerScenario::UpToDate => {
                         ProgressState::Replicate
@@ -124,6 +124,8 @@ impl Sandbox {
                 Some(node)
             })
             .collect::<Vec<Option<Interface>>>();
+        leader_node.groups.resolve_delegates(&prs);
+        leader_node.set_prs(prs);
         interfaces.insert(0, Some(leader_node));
         let network = Network::new(interfaces, l);
         Self {
@@ -209,26 +211,21 @@ fn new_storage_by_scenario(
             s.wl().append(&ents).expect("");
         }
         FollowerScenario::NeedEntries(index) => {
+            assert!(index > snapshot_index);
             let snapshot = new_snapshot(snapshot_index, 1, peers.clone());
             s.wl().apply_snapshot(snapshot).expect("");
-            let li = if index <= last_index && index > snapshot_index {
-                index
-            } else {
-                rand::thread_rng().gen_range(snapshot_index + 1, last_index)
-            };
             let mut ents = vec![];
-            for index in snapshot_index + 1..li {
-                ents.push(empty_entry(1, index));
+            for i in snapshot_index + 1..index {
+                ents.push(empty_entry(1, i));
             }
-            if li == last_index {
+            if index == last_index {
                 ents.push(empty_entry(2, index));
             }
             s.wl().append(&ents).expect("");
         }
         FollowerScenario::Snapshot => {
-            let li = rand::thread_rng().gen_range(1, snapshot_index);
             let mut ents = vec![];
-            for index in 2..li {
+            for index in 2..snapshot_index {
                 ents.push(empty_entry(1, index))
             }
             s.wl().append(&ents).expect("");
@@ -272,32 +269,43 @@ fn test_pick_group_delegate() {
             ],
         ),
     ];
-    for (expected_delegate, expected_msg_type, input) in tests {
+    for (i, (expected_delegate, expected_msg_type, input)) in tests.into_iter().enumerate() {
         let mut sandbox = Sandbox::new(&l, 1, input.clone(), group_config.clone(), 5, 10);
+
         sandbox
             .network
             .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
-            .expect("");
+            .unwrap();
         let mut msgs = sandbox.leader_mut().read_messages();
-        assert_eq!(1, msgs.len(), "Should only send one msg: {:?}", input);
+        assert_eq!(
+            1,
+            msgs.len(),
+            "#{} Should only send one msg: {:?}",
+            i,
+            input
+        );
+
         let m = msgs.pop().unwrap();
         assert_eq!(
             m.msg_type, expected_msg_type,
-            "The sent msg type should be {:?} but got {:?}",
-            expected_delegate, m.msg_type,
+            "#{} The sent msg type should be {:?} but got {:?}",
+            i, expected_delegate, m.msg_type,
         );
+
         let delegate = m.to;
         let delegate_set: HashSet<u64> = HashSet::from_iter(expected_delegate);
         assert!(
             delegate_set.contains(&delegate),
-            "set {:?}, delegate {}",
+            "#{} set {:?}, delegate {}",
+            i,
             &delegate_set,
             delegate
         );
         assert_eq!(
-            sandbox.leader().groups().get_delegate(1),
-            Some(delegate),
-            "The picked delegate should be cached"
+            sandbox.leader().groups.get_delegate(2),
+            delegate,
+            "#{} The picked delegate should be cached",
+            i
         );
     }
 }
@@ -351,7 +359,7 @@ fn test_broadcast_append_use_delegate() {
     let delegate = m.to;
     assert_eq!(delegate, 2);
     sandbox.network.dispatch(vec![m]).expect("");
-    assert_eq!(Some(2), sandbox.leader().groups().get_delegate(1));
+    assert_eq!(2, sandbox.leader().groups.get_delegate(2));
     let mut msgs = sandbox.get_mut(delegate).read_messages();
     assert_eq!(3, msgs.len());
     let bcast_resp = msgs.remove(0); // Send to leader first
@@ -404,15 +412,10 @@ fn test_delegate_reject_broadcast() {
     assert_eq!(MessageType::MsgAppendResponse, m.msg_type);
     assert!(m.reject);
     assert_eq!(1, m.to);
-    assert_eq!(
-        2,
-        m.get_bcast_targets().len(),
-        "If a delegate rejects broadcasting, it should send back all the `bcast_targets` to the leader"
-    );
     sandbox.network.dispatch(vec![m]).expect("");
     assert_eq!(
-        Some(4),
-        sandbox.leader().groups().get_delegate(1),
+        4,
+        sandbox.leader().groups.get_delegate(2),
         "The delegate won't be dismissed when rejecting MsgAppend"
     );
     let mut msgs = sandbox.leader_mut().read_messages();
@@ -439,7 +442,7 @@ fn test_follower_only_send_reject_to_delegate() {
         .expect("");
     let msgs = sandbox.leader_mut().read_messages();
     // Pick peer 2 as the delegate
-    assert_eq!(Some(2), sandbox.leader().groups().get_delegate(1));
+    assert_eq!(2, sandbox.leader().groups.get_delegate(3));
     sandbox.network.dispatch(msgs).expect("");
     let mut msgs = sandbox.get_mut(2).read_messages();
     // MsgAppendResponse to 1 and MsgAppend to 3

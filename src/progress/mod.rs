@@ -17,8 +17,6 @@ use std::cmp;
 
 use self::inflights::Inflights;
 use crate::raft::INVALID_INDEX;
-use crate::raft_log::RaftLog;
-use crate::storage::Storage;
 pub mod inflights;
 pub mod progress_set;
 
@@ -133,13 +131,6 @@ impl Progress {
         self.recent_active = false;
         debug_assert!(self.ins.cap() != 0);
         self.ins.reset();
-    }
-
-    pub(crate) fn can_be_delegate(&self) -> bool {
-        match self.state {
-            ProgressState::Replicate => self.pending_request_snapshot == INVALID_INDEX,
-            _ => false,
-        }
     }
 
     /// Changes the progress to a probe.
@@ -284,10 +275,5 @@ impl Progress {
                 self.state
             ),
         }
-    }
-
-    pub(crate) fn require_snapshot<T: Storage>(&self, raft_log: &RaftLog<T>) -> bool {
-        self.pending_snapshot == INVALID_INDEX
-            && (raft_log.term(self.next_idx - 1).is_err() || self.next_idx < raft_log.first_index())
     }
 }
