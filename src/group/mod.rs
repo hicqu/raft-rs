@@ -43,7 +43,7 @@ pub struct Groups {
     leader_group_id: u64,
 }
 
-impl<'a> Groups {
+impl Groups {
     /// Create new Groups with given configuration.
     pub(crate) fn new(config: Vec<(u64, Vec<u64>)>) -> Self {
         let mut indexes = HashMap::new();
@@ -119,7 +119,7 @@ impl<'a> Groups {
         }
     }
 
-    fn candidate_delegates(&'a self, group_id: u64) -> impl Iterator<Item = u64> + 'a {
+    fn candidate_delegates(&self, group_id: u64) -> impl Iterator<Item = u64> + '_ {
         self.indexes.iter().filter_map(move |(peer, (gid, _))| {
             if group_id == *gid {
                 return Some(*peer);
@@ -214,12 +214,7 @@ impl<'a> Groups {
         }
     }
 
-    pub(crate) fn check_pr_active(&mut self, id: u64, active: bool) {
-        if !active {
-            self.remove_delegate(id);
-        }
-    }
-
+    // Return the collection of mapping: group id => members
     pub fn dump(&self) -> Vec<(u64, Vec<u64>)> {
         let mut m: HashMap<u64, Vec<u64>> = HashMap::new();
         for (peer, (group, _)) in &self.indexes {

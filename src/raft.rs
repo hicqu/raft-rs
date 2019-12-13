@@ -1896,7 +1896,8 @@ impl<T: Storage> Raft<T> {
             for target in m.take_bcast_targets() {
                 // Self is delegate, sync raft logs to other members.
                 if let Some(pr) = prs.get_mut(target) {
-                    pr.reset_on_delegate(self.raft_log.last_index() + 1);
+                    // FIXME: The delegate could never send the target raft logs
+                    // as the pr is paused
                     self.send_append(target, pr);
                 }
             }
@@ -2278,7 +2279,10 @@ impl<T: Storage> Raft<T> {
         let self_id = self.id;
         let mut prs = self.take_prs();
         let res = prs.quorum_recently_active(self_id, |id, active| {
-            self.groups.check_pr_active(id, active)
+            if !active {
+                // Remove the non-active delegate peer
+                self.groups.remove_delegate(id);
+            }
         });
         self.set_prs(prs);
         res
@@ -2330,16 +2334,5 @@ impl<T: Storage> Raft<T> {
             id;
             "progress" => ?progress,
         );
-    }
-}
-
-pub(crate) fn is_local_msg(t: MessageType) -> bool {
-    match t {
-        MessageType::MsgHup
-        | MessageType::MsgBeat
-        | MessageType::MsgUnreachable
-        | MessageType::MsgSnapStatus
-        | MessageType::MsgCheckQuorum => true,
-        _ => false,
     }
 }

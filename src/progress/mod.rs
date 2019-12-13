@@ -117,22 +117,6 @@ impl Progress {
         self.ins.reset();
     }
 
-    // Reset a progress on delegate.
-    pub(crate) fn reset_on_delegate(&mut self, next_idx: u64) {
-        if self.matched != 0 {
-            // The progress has already reported to the delegate.
-            return;
-        }
-        self.next_idx = next_idx;
-        self.state = ProgressState::default();
-        self.paused = false;
-        self.pending_snapshot = 0;
-        self.pending_request_snapshot = INVALID_INDEX;
-        self.recent_active = false;
-        debug_assert!(self.ins.cap() != 0);
-        self.ins.reset();
-    }
-
     /// Changes the progress to a probe.
     pub fn become_probe(&mut self) {
         // If the original state is ProgressStateSnapshot, progress knows that

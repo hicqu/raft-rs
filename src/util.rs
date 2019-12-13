@@ -71,14 +71,6 @@ pub fn limit_size<T: PbMessage + Clone>(entries: &mut Vec<T>, max: Option<u64>) 
     entries.truncate(limit);
 }
 
-/// Compute the total size of given entries
-#[inline]
-pub fn compute_ents_size<T: PbMessage + Clone>(entries: &[T]) -> u64 {
-    entries
-        .iter()
-        .fold(0, |acc, e| acc + u64::from(e.compute_size()))
-}
-
 /// Check whether the entry is continuous to the message.
 /// i.e msg's next entry index should be equal to the first entries's index
 pub fn is_continuous_ents(msg: &Message, ents: &[Entry]) -> bool {
