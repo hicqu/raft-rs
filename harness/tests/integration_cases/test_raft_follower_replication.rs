@@ -124,7 +124,6 @@ impl Sandbox {
                 Some(node)
             })
             .collect::<Vec<Option<Interface>>>();
-        leader_node.groups.resolve_delegates(&prs);
         leader_node.set_prs(prs);
         interfaces.insert(0, Some(leader_node));
         let network = Network::new(interfaces, l);
@@ -137,7 +136,6 @@ impl Sandbox {
     }
 
     // Only for `UpToDate` and `NeedEntries`
-    #[inline]
     fn assert_entries_consistent(leader: Vec<Entry>, target: Vec<Entry>) {
         for (e1, e2) in leader.iter().zip(target) {
             assert_eq!(e1.index, e2.index);
@@ -145,12 +143,11 @@ impl Sandbox {
         }
     }
 
-    #[inline]
     fn assert_final_state(&self) {
         self.network.peers.iter().for_each(|(id, n)| {
             assert_eq!(
                 n.raft_log.last_index(),
-                self.last_index + 1,
+                self.last_index,
                 "The peer {} last index should be up-to-date",
                 id
             )
@@ -158,36 +155,43 @@ impl Sandbox {
     }
 
     // Get mutable Interface of the leader
-    #[inline]
-    pub fn leader_mut(&mut self) -> &mut Interface {
+    fn leader_mut(&mut self) -> &mut Interface {
         let leader = self.leader;
         self.network.peers.get_mut(&leader).unwrap()
     }
 
     // Get immutable Interface of the leader
-    #[inline]
-    pub fn leader(&self) -> &Interface {
+    fn leader(&self) -> &Interface {
         let leader = self.leader;
         self.network.peers.get(&leader).unwrap()
     }
 
     // Get a mutable Interface by given id
-    #[inline]
-    pub fn get_mut(&mut self, id: u64) -> &mut Interface {
+    fn get_mut(&mut self, id: u64) -> &mut Interface {
         self.network.peers.get_mut(&id).unwrap()
+    }
+
+    fn propose(&mut self, only_dispatch: bool) {
+        let proposal = new_message(1, 1, MessageType::MsgPropose, 1);
+        if only_dispatch {
+            self.network.dispatch(vec![proposal]).unwrap();
+        } else {
+            self.network.send(vec![proposal]);
+        }
+        self.last_index += 1;
     }
 }
 
 fn new_storage(peers: Vec<u64>, snapshot_index: u64, last_index: u64) -> MemStorage {
     let s = MemStorage::new_with_conf_state((peers.clone(), vec![]));
     let snapshot = new_snapshot(snapshot_index, 1, peers.clone());
-    s.wl().apply_snapshot(snapshot).expect("");
+    s.wl().apply_snapshot(snapshot).unwrap();
     if snapshot_index < last_index {
         let mut ents = vec![];
         for index in snapshot_index + 1..=last_index {
             ents.push(empty_entry(1, index));
         }
-        s.wl().append(&ents).expect("");
+        s.wl().append(&ents).unwrap();
     }
     s
 }
@@ -202,18 +206,18 @@ fn new_storage_by_scenario(
     match scenario {
         FollowerScenario::UpToDate => {
             let snapshot = new_snapshot(snapshot_index, 1, peers.clone());
-            s.wl().apply_snapshot(snapshot).expect("");
+            s.wl().apply_snapshot(snapshot).unwrap();
             let mut ents = vec![];
             for index in snapshot_index + 1..last_index {
                 ents.push(empty_entry(1, index));
             }
             ents.push(empty_entry(2, last_index));
-            s.wl().append(&ents).expect("");
+            s.wl().append(&ents).unwrap();
         }
         FollowerScenario::NeedEntries(index) => {
             assert!(index > snapshot_index);
             let snapshot = new_snapshot(snapshot_index, 1, peers.clone());
-            s.wl().apply_snapshot(snapshot).expect("");
+            s.wl().apply_snapshot(snapshot).unwrap();
             let mut ents = vec![];
             for i in snapshot_index + 1..index {
                 ents.push(empty_entry(1, i));
@@ -221,14 +225,14 @@ fn new_storage_by_scenario(
             if index == last_index {
                 ents.push(empty_entry(2, index));
             }
-            s.wl().append(&ents).expect("");
+            s.wl().append(&ents).unwrap();
         }
         FollowerScenario::Snapshot => {
             let mut ents = vec![];
             for index in 2..snapshot_index {
                 ents.push(empty_entry(1, index))
             }
-            s.wl().append(&ents).expect("");
+            s.wl().append(&ents).unwrap();
         }
     };
     s
@@ -272,10 +276,7 @@ fn test_pick_group_delegate() {
     for (i, (expected_delegate, expected_msg_type, input)) in tests.into_iter().enumerate() {
         let mut sandbox = Sandbox::new(&l, 1, input.clone(), group_config.clone(), 5, 10);
 
-        sandbox
-            .network
-            .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
-            .unwrap();
+        sandbox.propose(true);
         let mut msgs = sandbox.leader_mut().read_messages();
         assert_eq!(
             1,
@@ -321,10 +322,8 @@ fn test_delegate_in_group_containing_leader() {
         (4, FollowerScenario::UpToDate),
     ];
     let mut sandbox = Sandbox::new(&l, 1, followers.clone(), group_config.clone(), 5, 10);
-    sandbox
-        .network
-        .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
-        .expect("");
+
+    sandbox.propose(true);
     let msgs = sandbox.leader_mut().read_messages();
     assert_eq!(msgs.len(), 3);
     msgs.iter()
@@ -346,22 +345,24 @@ fn test_broadcast_append_use_delegate() {
         5,
         10,
     );
-    sandbox
-        .network
-        .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
-        .expect("");
+
+    sandbox.propose(true);
     let mut msgs = sandbox.leader_mut().read_messages();
     assert_eq!(1, msgs.len());
+
     let m = msgs.pop().unwrap();
     assert_eq!(m.msg_type, MessageType::MsgAppend);
     assert!(m.bcast_targets.contains(&3));
     assert!(m.bcast_targets.contains(&4));
+
     let delegate = m.to;
     assert_eq!(delegate, 2);
-    sandbox.network.dispatch(vec![m]).expect("");
+
+    sandbox.network.dispatch(vec![m]).unwrap();
     assert_eq!(2, sandbox.leader().groups.get_delegate(2));
     let mut msgs = sandbox.get_mut(delegate).read_messages();
     assert_eq!(3, msgs.len());
+
     let bcast_resp = msgs.remove(0); // Send to leader first
     assert_eq!(bcast_resp.msg_type, MessageType::MsgAppendResponse);
     let to_send_ids = sandbox
@@ -397,27 +398,27 @@ fn test_delegate_reject_broadcast() {
         (4, FollowerScenario::NeedEntries(12)),
     ];
     let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 20);
+
     sandbox.leader_mut().mut_prs().get_mut(4).unwrap().next_idx = 15; // make a conflict next_idx
-    sandbox
-        .network
-        .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
-        .expect("");
+    sandbox.propose(true);
     let mut msgs = sandbox.leader_mut().read_messages();
     let m = msgs.pop().unwrap();
     assert_eq!(4, m.to);
-    sandbox.network.dispatch(vec![m]).expect("");
+    sandbox.network.dispatch(vec![m]).unwrap();
+
     let mut msgs = sandbox.get_mut(4).read_messages();
     assert_eq!(1, msgs.len());
     let m = msgs.pop().unwrap();
     assert_eq!(MessageType::MsgAppendResponse, m.msg_type);
     assert!(m.reject);
     assert_eq!(1, m.to);
-    sandbox.network.dispatch(vec![m]).expect("");
+    sandbox.network.dispatch(vec![m]).unwrap();
     assert_eq!(
         4,
         sandbox.leader().groups.get_delegate(2),
         "The delegate won't be dismissed when rejecting MsgAppend"
     );
+
     let mut msgs = sandbox.leader_mut().read_messages();
     assert_eq!(1, msgs.len());
     let m = msgs.pop().unwrap();
@@ -436,14 +437,13 @@ fn test_follower_only_send_reject_to_delegate() {
         (3, FollowerScenario::NeedEntries(7)),
     ];
     let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 20);
-    sandbox
-        .network
-        .dispatch(vec![new_message(1, 1, MessageType::MsgPropose, 1)])
-        .expect("");
+
+    sandbox.propose(true);
     let msgs = sandbox.leader_mut().read_messages();
+
     // Pick peer 2 as the delegate
     assert_eq!(2, sandbox.leader().groups.get_delegate(3));
-    sandbox.network.dispatch(msgs).expect("");
+    sandbox.network.dispatch(msgs).unwrap();
     let mut msgs = sandbox.get_mut(2).read_messages();
     // MsgAppendResponse to 1 and MsgAppend to 3
     // We only care about the latter
@@ -453,7 +453,7 @@ fn test_follower_only_send_reject_to_delegate() {
     assert_eq!(m.to, 3);
     assert_eq!(m.from, 1);
     assert_eq!(m.delegate, 2);
-    sandbox.network.dispatch(vec![m]).expect("");
+    sandbox.network.dispatch(vec![m]).unwrap();
     let mut msgs = sandbox.get_mut(3).read_messages();
     assert_eq!(msgs.len(), 1);
     let m = msgs.pop().unwrap();
@@ -462,16 +462,117 @@ fn test_follower_only_send_reject_to_delegate() {
 }
 
 #[test]
-fn test_send_empty_msg_when_paused() {
-    // TODO
+fn test_paused_delegate() {
+    let l = default_logger();
+    let group_config = vec![(2, vec![1]), (1, vec![2, 3, 4])];
+    let followers = vec![
+        (2, FollowerScenario::NeedEntries(10)),
+        (3, FollowerScenario::NeedEntries(7)),
+        (4, FollowerScenario::Snapshot),
+    ];
+    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 20);
+    for id in 1..=4 {
+        // Reset inflights capacity to 1.
+        let r = sandbox.network.peers.get_mut(&id).unwrap();
+        r.max_inflight = 1;
+        for (_, pr) in r.mut_prs().iter_mut() {
+            pr.ins = Inflights::new(1);
+        }
+    }
+
+    // Leader will send append only to peer 2.
+    sandbox.propose(true);
+    let msgs = sandbox.get_mut(1).read_messages();
+    assert_eq!(msgs.len(), 1);
+    sandbox.network.dispatch(msgs).unwrap();
+
+    // More proposals wont' cause more messages sent out.
+    sandbox.propose(true);
+    let msgs = sandbox.get_mut(1).read_messages();
+    assert_eq!(msgs.len(), 0);
+
+    // Step the append response from peer 2, then the leader can send more.
+    // And all append messages should contain `bcast_targets`.
+    let append_resp = sandbox.get_mut(2).read_messages()[0].clone();
+    sandbox.network.dispatch(vec![append_resp]).unwrap();
+    let msgs = sandbox.get_mut(1).read_messages();
+    assert!(!msgs[0].get_bcast_targets().is_empty());
 }
 
 #[test]
 fn test_dismiss_delegate_when_not_active() {
-    // TODO
+    let l = default_logger();
+    let group_config = vec![(2, vec![1]), (1, vec![2, 3, 4])];
+    let followers = vec![
+        (2, FollowerScenario::NeedEntries(10)),
+        (3, FollowerScenario::NeedEntries(7)),
+        (4, FollowerScenario::NeedEntries(6)),
+    ];
+    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 20);
+
+    for id in 1..=4 {
+        // Reset check_quorum to true.
+        let r = sandbox.network.peers.get_mut(&id).unwrap();
+        r.check_quorum = true;
+    }
+
+    // Leader will send append only to peer 2.
+    sandbox.propose(true);
+    let msgs = sandbox.get_mut(1).read_messages();
+    assert_eq!(msgs.len(), 1);
+    sandbox.network.dispatch(msgs).unwrap();
+
+    // Let the leader check quorum twice. Then delegates should be dismissed.
+    for _ in 0..2 {
+        {
+            let r = sandbox.network.peers.get_mut(&1).unwrap();
+            for (id, pr) in r.mut_prs().iter_mut() {
+                if *id == 3 || *id == 4 {
+                    pr.recent_active = true;
+                }
+            }
+        }
+        let s = sandbox.network.peers[&1].election_elapsed;
+        let e = sandbox.network.peers[&1].election_timeout();
+        for _ in s..=e {
+            sandbox.leader_mut().tick();
+        }
+    }
+
+    // After the delegate is dismissed, leader will send append to it and an another new delegate.
+    sandbox.propose(true);
+    let mut msgs = sandbox.get_mut(1).read_messages();
+    msgs = msgs
+        .into_iter()
+        .filter(|m| m.get_msg_type() == MessageType::MsgAppend)
+        .collect();
+    assert_eq!(msgs.len(), 2);
+    sandbox.network.send(msgs);
+    sandbox.assert_final_state();
 }
 
 #[test]
 fn test_update_group_by_group_id_in_message() {
-    // TODO
+    let l = default_logger();
+    let group_config = vec![(1, vec![1]), (2, vec![2, 3, 4]), (3, vec![5])];
+    let followers = vec![
+        (2, FollowerScenario::NeedEntries(10)),
+        (3, FollowerScenario::NeedEntries(9)),
+        (4, FollowerScenario::NeedEntries(8)),
+        (5, FollowerScenario::NeedEntries(7)),
+    ];
+    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 20);
+
+    // Change peer 4 group id from 2 to 3.
+    sandbox.network.peers.get_mut(&4).unwrap().group_id = 3;
+
+    sandbox.propose(false);
+    sandbox.assert_final_state();
+
+    sandbox.propose(false);
+    sandbox.assert_final_state();
+    assert_eq!(
+        sandbox.leader().groups.dump(),
+        vec![(1, vec![1]), (2, vec![2, 3]), (3, vec![4, 5])],
+    );
 }

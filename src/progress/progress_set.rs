@@ -433,11 +433,11 @@ impl ProgressSet {
     {
         let mut active = HashSet::default();
         for (&id, pr) in self.voters_mut() {
-            f(id, pr.recent_active);
             if id == perspective_of {
                 active.insert(id);
                 continue;
             }
+            f(id, pr.recent_active);
             if pr.recent_active {
                 active.insert(id);
             }

@@ -529,10 +529,8 @@ impl<T: Storage> Raft<T> {
         if self.leader_id != self.id {
             m.from = self.leader_id;
             m.delegate = self.id;
-        } else {
-            if let Some(ids) = self.groups.get_bcast_targets(m.to) {
-                m.set_bcast_targets(ids.clone());
-            }
+        } else if let Some(ids) = self.groups.get_bcast_targets(m.to) {
+            m.set_bcast_targets(ids.clone());
         }
     }
 
@@ -600,7 +598,6 @@ impl<T: Storage> Raft<T> {
         self.groups.resolve_delegates(&prs);
         for (id, pr) in prs.iter_mut().filter(|(id, _)| **id != self_id) {
             let delegate = self.groups.get_delegate(*id);
-            println!("send to {}, delegate: {}", *id, delegate);
             if delegate == INVALID_ID || delegate == *id {
                 self.send_append(*id, pr);
             }
@@ -936,6 +933,7 @@ impl<T: Storage> Raft<T> {
 
     /// Steps the raft along via a message. This should be called everytime your raft receives a
     /// message from a peer.
+    #[allow(clippy::collapsible_if)]
     pub fn step(&mut self, m: Message) -> Result<()> {
         if m.term != 0 && m.get_group_id() != INVALID_ID {
             if self.groups.update_group_id(m.from, m.get_group_id()) {
@@ -944,6 +942,7 @@ impl<T: Storage> Raft<T> {
                 self.set_prs(prs);
             }
         }
+
         // Handle the message term, which may result in our stepping down to a follower.
         if m.term == 0 {
             // local message
@@ -1276,6 +1275,18 @@ impl<T: Storage> Raft<T> {
             ProgressState::Replicate => pr.ins.free_to(m.index),
         }
         *maybe_commit = true;
+    }
+
+    fn handle_append_response_on_delegate(&mut self, m: &Message) {
+        let mut prs = self.take_prs();
+        let mut send_append = false;
+        let (mut _h1, mut _h2) = (false, false);
+        self.handle_append_response(&m, &mut prs, &mut _h1, &mut send_append, &mut _h2);
+        if send_append {
+            let from = m.from;
+            self.send_append(from, prs.get_mut(from).unwrap());
+        }
+        self.set_prs(prs);
     }
 
     fn process_leader_transfer(&mut self, from: u64, match_idx: u64) {
@@ -1820,17 +1831,7 @@ impl<T: Storage> Raft<T> {
                 self.read_states.push(rs);
             }
             MessageType::MsgAppendResponse => {
-                let mut prs = self.take_prs();
-                let mut send_append = false;
-                let (mut _h1, mut _h2) = (false, false);
-                self.handle_append_response(&m, &mut prs, &mut _h1, &mut send_append, &mut _h2);
-                self.set_prs(prs);
-                if send_append {
-                    let from = m.from;
-                    let mut prs = self.take_prs();
-                    self.send_append(from, prs.get_mut(from).unwrap());
-                    self.set_prs(prs);
-                }
+                self.handle_append_response_on_delegate(&m);
             }
             _ => {}
         }

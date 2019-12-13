@@ -18,7 +18,7 @@
 //! # Follower Replication
 //! See https://github.com/tikv/rfcs/pull/33
 
-use std::collections::{hash_map::Entry as MapEntry, HashMap};
+use std::collections::HashMap;
 
 use crate::progress::progress_set::ProgressSet;
 use crate::raft::INVALID_ID;
@@ -93,7 +93,6 @@ impl<'a> Groups {
             None => return,
         };
 
-        println!("pick delegate for {}", to);
         let (mut chosen, mut matched, mut bcast_targets) = (INVALID_ID, 0, vec![]);
         for id in self.candidate_delegates(group_id) {
             let pr = prs.get(id).unwrap();
@@ -107,10 +106,8 @@ impl<'a> Groups {
                 bcast_targets.push(id);
             }
         }
-        println!(
-            "pick delegate for {} choose {}, others: {:?}",
-            to, chosen, bcast_targets
-        );
+
+        // If there is only one member in the group, it remains unresolved.
         if chosen != INVALID_ID && !bcast_targets.is_empty() {
             let (_, d) = self.indexes.get_mut(&chosen).unwrap();
             *d = chosen;
@@ -131,16 +128,18 @@ impl<'a> Groups {
         })
     }
 
-    /// Unset the delegate by delegate id.
+    /// Unset the delegate by delegate id. If the peer is not delegate, do nothing.
     pub(crate) fn remove_delegate(&mut self, delegate: u64) {
-        if self.indexes.remove(&delegate).is_some() {
+        if self.bcast_targets.remove(&delegate).is_some() {
+            // Remove the delegate from the group system since it's temorary unreachable.
+            // And the peer will be re-added after the leader receives a message from it.
+            self.indexes.remove(&delegate);
             for (peer, (_, d)) in self.indexes.iter_mut() {
                 if *d == delegate {
                     *d = INVALID_ID;
                     self.unresolved.push(*peer);
                 }
             }
-            self.bcast_targets.remove(&delegate);
         }
     }
 
@@ -157,31 +156,52 @@ impl<'a> Groups {
 
     /// Update given `peer`'s group ID. Return `true` if any peers are unresolved.
     pub(crate) fn update_group_id(&mut self, peer: u64, group_id: u64) -> bool {
-        let mut remove_delegate = false;
-        match self.indexes.entry(peer) {
-            MapEntry::Occupied(e) => {
-                if group_id == INVALID_ID {
-                    let (_, (_, d)) = e.remove_entry();
-                    remove_delegate = d == peer;
-                } else {
-                    let (ref mut gid, ref mut d) = e.into_mut();
-                    if *gid != group_id {
-                        *gid = group_id;
-                        *d = INVALID_ID;
-                        self.unresolved.push(peer);
-                        remove_delegate = *d == peer;
-                    }
-                }
+        if group_id == INVALID_ID {
+            self.unmark_peer(peer);
+        } else if let Some((gid, _)) = self.indexes.get(&peer) {
+            if *gid == group_id {
+                return false;
             }
-            MapEntry::Vacant(e) => {
-                e.insert((group_id, INVALID_ID));
-                self.unresolved.push(peer);
-            }
-        }
-        if remove_delegate {
-            self.remove_delegate(peer);
+            self.unmark_peer(peer);
+            self.mark_peer(peer, group_id);
+        } else {
+            self.mark_peer(peer, group_id);
         }
         !self.unresolved.is_empty()
+    }
+
+    fn unmark_peer(&mut self, peer: u64) {
+        if let Some((_, del)) = self.indexes.remove(&peer) {
+            if peer == del {
+                self.remove_delegate(del);
+                return;
+            }
+            let mut targets = self.bcast_targets.remove(&del).unwrap();
+            let pos = targets.iter().position(|id| *id == peer).unwrap();
+            targets.swap_remove(pos);
+            if !targets.is_empty() {
+                self.bcast_targets.insert(del, targets);
+            }
+        }
+    }
+
+    fn mark_peer(&mut self, peer: u64, group_id: u64) {
+        let (found, delegate) = self
+            .indexes
+            .iter()
+            .find(|(_, (gid, _))| *gid == group_id)
+            .map_or((false, INVALID_ID), |(_, (_, d))| (true, *d));
+
+        let _x = self.indexes.insert(peer, (group_id, delegate));
+        debug_assert!(_x.is_none(), "peer can't exist before mark");
+
+        if delegate != INVALID_ID {
+            self.bcast_targets.get_mut(&delegate).unwrap().push(peer);
+        } else if found {
+            // We have found a peer in the same group but haven't been delegated, add it to
+            // `unresolved`.
+            self.unresolved.push(peer);
+        }
     }
 
     // Pick delegates for all peers if need.
@@ -198,5 +218,106 @@ impl<'a> Groups {
         if !active {
             self.remove_delegate(id);
         }
+    }
+
+    pub fn dump(&self) -> Vec<(u64, Vec<u64>)> {
+        let mut m: HashMap<u64, Vec<u64>> = HashMap::new();
+        for (peer, (group, _)) in &self.indexes {
+            let v = m.entry(*group).or_default();
+            v.push(*peer);
+        }
+        for v in m.values_mut() {
+            v.sort();
+        }
+        let mut v: Vec<_> = m.into_iter().collect();
+        v.sort_by(|a1, a2| a1.0.cmp(&a2.0));
+        v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::progress::Progress;
+
+    fn next_delegate_and_bcast_targets(group: &Groups) -> (u64, Vec<u64>) {
+        group
+            .bcast_targets
+            .iter()
+            .next()
+            .map(|(k, v)| (*k, v.clone()))
+            .unwrap()
+    }
+
+    #[test]
+    fn test_group() {
+        let mut group = Groups::new(vec![(1, vec![1, 2]), (2, vec![3, 4, 5]), (3, vec![6])]);
+        assert_eq!(group.unresolved.len(), 6);
+        group.set_leader_group_id(1);
+
+        let mut prs = ProgressSet::new(crate::default_logger());
+        for id in 1..=6 {
+            let mut pr = Progress::new(100, 100);
+            pr.matched = 99;
+            prs.insert_voter(id, pr).unwrap();
+        }
+
+        // After the resolving, only group 2 should be delegated.
+        group.resolve_delegates(&prs);
+        assert_eq!(group.bcast_targets.len(), 1);
+        let (delegate, mut targets) = next_delegate_and_bcast_targets(&group);
+        targets.push(delegate);
+        targets.sort();
+        assert_eq!(targets, [3, 4, 5]);
+
+        // Remove a delegate which doesn't exists.
+        group.remove_delegate(6);
+        assert!(group.unresolved.is_empty());
+
+        // Remove a peer which is not delegate.
+        let remove = match delegate {
+            3 => 4,
+            4 => 5,
+            5 => 3,
+            _ => unreachable!(),
+        };
+        group.remove_delegate(remove);
+        assert!(group.unresolved.is_empty());
+        let (_, targets) = next_delegate_and_bcast_targets(&group);
+        assert_eq!(targets.len(), 2);
+
+        // Remove a delegate.
+        group.remove_delegate(delegate);
+        assert_eq!(group.unresolved.len(), 2);
+        group.resolve_delegates(&prs);
+        let (_, targets) = next_delegate_and_bcast_targets(&group);
+        assert_eq!(targets.len(), 1);
+
+        // Add the removed peer back, without group id.
+        let peer = delegate;
+        group.update_group_id(peer, INVALID_ID);
+        assert!(group.unresolved.is_empty());
+
+        // Add the removed peer back, with group id.
+        assert!(!group.update_group_id(peer, 2));
+        let (_, targets) = next_delegate_and_bcast_targets(&group);
+        assert_eq!(targets.len(), 2);
+
+        // Get the new delegate.
+        let (delegate, _) = next_delegate_and_bcast_targets(&group);
+        assert_ne!(peer, delegate);
+
+        // The peer reports to the group again, without group id.
+        group.update_group_id(peer, INVALID_ID);
+        let (_, targets) = next_delegate_and_bcast_targets(&group);
+        assert_eq!(targets.len(), 1);
+
+        // The delegate changes group to 3.
+        assert!(group.update_group_id(delegate, 3));
+        assert!(group.bcast_targets.is_empty());
+        group.resolve_delegates(&prs);
+        let (_, targets) = next_delegate_and_bcast_targets(&group);
+        assert!(targets.contains(&delegate) || targets.contains(&6));
+        assert!(group.get_delegate(6) == 6 || group.get_delegate(6) == delegate);
     }
 }
