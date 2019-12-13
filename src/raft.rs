@@ -935,8 +935,8 @@ impl<T: Storage> Raft<T> {
     /// message from a peer.
     #[allow(clippy::collapsible_if)]
     pub fn step(&mut self, m: Message) -> Result<()> {
-        if m.term != 0 && m.get_group_id() != INVALID_ID {
-            if self.groups.update_group_id(m.from, m.get_group_id()) {
+        if m.term != 0 && m.group_id != INVALID_ID && self.is_leader() {
+            if self.groups.update_group_id(m.from, m.group_id) {
                 let prs = self.take_prs();
                 self.groups.resolve_delegates(&prs);
                 self.set_prs(prs);

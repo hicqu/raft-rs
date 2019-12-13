@@ -214,7 +214,7 @@ impl Groups {
         }
     }
 
-    // Return the collection of mapping: group id => members
+    /// Dump the group system as a collection of mapping: group id => members.
     pub fn dump(&self) -> Vec<(u64, Vec<u64>)> {
         let mut m: HashMap<u64, Vec<u64>> = HashMap::new();
         for (peer, (group, _)) in &self.indexes {
