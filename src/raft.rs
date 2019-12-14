@@ -180,6 +180,10 @@ pub struct Raft<T: Storage> {
     pub groups: Groups,
     /// The group ID of this node
     pub group_id: u64,
+    // Indicates that self is a delegate or not. 
+    // Become true when receive a `MsgAppend` contains non-empty `bcast_targets` from leader
+    // Become false when receive a normal `MsgAppend` without `bcast_targets`
+    is_delegate: bool,
 
     /// The logger for the raft structure.
     pub(crate) logger: slog::Logger,
@@ -254,6 +258,7 @@ impl<T: Storage> Raft<T> {
             batch_append: c.batch_append,
             groups: Default::default(),
             group_id: c.group_id,
+            is_delegate: false,
             logger,
         };
         for p in voters {
@@ -1284,7 +1289,7 @@ impl<T: Storage> Raft<T> {
         self.handle_append_response(&m, &mut prs, &mut _h1, &mut send_append, &mut _h2);
         if send_append {
             let from = m.from;
-            self.send_append(from, prs.get_mut(from).unwrap());
+            self.send_append(from, dbg!(prs.get_mut(from).unwrap()));
         }
         self.set_prs(prs);
     }
@@ -1886,9 +1891,14 @@ impl<T: Storage> Raft<T> {
                 "got message with lower index than committed.";
             );
             to_send.index = self.raft_log.committed;
+            if msg_from_delegate(&m) {
+                to_send.to = m.delegate;
+            }
             self.send(to_send);
             return;
         }
+        let old_is_delegate = self.is_delegate;
+        self.is_delegate = !m.get_bcast_targets().is_empty();
         let accepted = self.handle_append_entries(&m, &mut to_send);
         self.send(to_send);
         if accepted {
@@ -1896,8 +1906,11 @@ impl<T: Storage> Raft<T> {
             for target in m.take_bcast_targets() {
                 // Self is delegate, sync raft logs to other members.
                 if let Some(pr) = prs.get_mut(target) {
-                    // FIXME: The delegate could never send the target raft logs
-                    // as the pr is paused
+                    if !old_is_delegate && self.is_delegate {
+                        // Make sure the delegate can send a message to the target
+                        pr.become_probe();
+                        pr.optimistic_update(self.raft_log.last_index() - 1);
+                    }
                     self.send_append(target, pr);
                 }
             }
@@ -1913,7 +1926,7 @@ impl<T: Storage> Raft<T> {
             .maybe_append(m.index, m.log_term, m.commit, &m.entries)
         {
             to_send.set_index(last_idx);
-            if m.delegate != INVALID_ID {
+            if msg_from_delegate(m) {
                 // Follower receives the message from a delegate, send response back to the delegate
                 let mut to_delegate = to_send.clone();
                 to_delegate.to = m.delegate;
@@ -1931,7 +1944,7 @@ impl<T: Storage> Raft<T> {
                 "index" => m.index,
                 "logterm" => ?self.raft_log.term(m.index),
             );
-            if m.delegate != INVALID_ID {
+            if msg_from_delegate(m) {
                 // Follower only sends rejection to the delegate.
                 to_send.to = m.delegate;
             }
@@ -1974,7 +1987,7 @@ impl<T: Storage> Raft<T> {
                 snapshot_term = sterm;
             );
             to_send.index = self.raft_log.last_index();
-            if m.delegate != INVALID_ID {
+            if msg_from_delegate(&m) {
                 // The snapshot comes from the peer's delegate.
                 let mut to_delegate = to_send.clone();
                 to_delegate.to = m.delegate;
@@ -2002,6 +2015,9 @@ impl<T: Storage> Raft<T> {
                 snapshot_index = sindex,
                 snapshot_term = sterm;
             );
+            if msg_from_delegate(&m) {
+                to_send.to = m.delegate
+            }
             to_send.index = self.raft_log.committed;
         }
         self.send(to_send);
@@ -2335,4 +2351,8 @@ impl<T: Storage> Raft<T> {
             "progress" => ?progress,
         );
     }
+}
+
+fn msg_from_delegate(m: &Message) -> bool {
+    m.delegate != INVALID_ID
 }

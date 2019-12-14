@@ -152,6 +152,14 @@ impl Sandbox {
                 id
             )
         });
+        // The ProgressSet should be updated
+        self.network
+            .peers
+            .get(&self.leader)
+            .unwrap()
+            .prs()
+            .iter()
+            .for_each(|(_, pr)| assert!(pr.matched == self.last_index))
     }
 
     // Get mutable Interface of the leader
@@ -171,8 +179,9 @@ impl Sandbox {
         self.network.peers.get_mut(&id).unwrap()
     }
 
+    // Send a MsgPropose to the leader
     fn propose(&mut self, only_dispatch: bool) {
-        let proposal = new_message(1, 1, MessageType::MsgPropose, 1);
+        let proposal = new_message(self.leader, self.leader, MessageType::MsgPropose, 1);
         if only_dispatch {
             self.network.dispatch(vec![proposal]).unwrap();
         } else {
@@ -575,4 +584,32 @@ fn test_update_group_by_group_id_in_message() {
         sandbox.leader().groups.dump(),
         vec![(1, vec![1]), (2, vec![2, 3]), (3, vec![4, 5])],
     );
+}
+
+#[test]
+fn test_delegate_must_be_able_to_send_logs_to_targets() {
+    let l = default_logger();
+    let group_config = vec![(1, vec![1]), (2, vec![2, 3, 4])];
+    let followers = vec![
+        (2, FollowerScenario::UpToDate),
+        (3, FollowerScenario::NeedEntries(9)),
+        (4, FollowerScenario::Snapshot),
+    ];
+    let mut sandbox = Sandbox::new(&l, 1, followers, group_config, 5, 20);
+    let max_inflight = sandbox.network.peers.get(&2).unwrap().max_inflight;
+    // Make Inflights 3 full
+    let node2 = sandbox.get_mut(2);
+    let pr3 = node2.mut_prs().get_mut(3).unwrap();
+    pr3.become_replicate();
+    for i in 1..=max_inflight {
+        pr3.ins.add(i as u64);
+    }
+    assert!(pr3.is_paused());
+    // Make Progress 4 paused
+    let pr4 = node2.mut_prs().get_mut(4).unwrap();
+    pr4.become_probe();
+    pr4.pause();
+    assert!(pr4.is_paused());
+    sandbox.propose(false);
+    sandbox.assert_final_state();
 }
