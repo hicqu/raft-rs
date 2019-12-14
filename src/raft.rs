@@ -1289,7 +1289,7 @@ impl<T: Storage> Raft<T> {
         self.handle_append_response(&m, &mut prs, &mut _h1, &mut send_append, &mut _h2);
         if send_append {
             let from = m.from;
-            self.send_append(from, dbg!(prs.get_mut(from).unwrap()));
+            self.send_append(from, prs.get_mut(from).unwrap());
         }
         self.set_prs(prs);
     }
