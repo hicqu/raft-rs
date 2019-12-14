@@ -180,7 +180,7 @@ pub struct Raft<T: Storage> {
     pub groups: Groups,
     /// The group ID of this node
     pub group_id: u64,
-    // Indicates that self is a delegate or not. 
+    // Indicates that self is a delegate or not.
     // Become true when receive a `MsgAppend` contains non-empty `bcast_targets` from leader
     // Become false when receive a normal `MsgAppend` without `bcast_targets`
     is_delegate: bool,
