@@ -528,10 +528,10 @@ impl<T: Storage> Raft<T> {
         is_batched
     }
 
-    // Attach group info to `m` before it's sent out. It can be called on leaders or delegates.
+    // Attach group info to `m` before it's sent out. It can be called on the leader or delegates.
     fn attach_group_info(&self, m: &mut Message) {
         debug_assert!(m.to != INVALID_ID);
-        if self.leader_id != self.id {
+        if self.is_delegate {
             m.from = self.leader_id;
             m.delegate = self.id;
         } else if let Some(ids) = self.groups.get_bcast_targets(m.to) {
@@ -839,7 +839,7 @@ impl<T: Storage> Raft<T> {
         self.leader_id = self.id;
         self.state = StateRole::Leader;
         self.groups.set_leader_group_id(self.group_id);
-
+        self.is_delegate = false;
         // Followers enter replicate mode when they've been successfully probed
         // (perhaps after having received a snapshot as a result). The leader is
         // trivially in this state. Note that r.reset() has initialized this
@@ -1899,7 +1899,8 @@ impl<T: Storage> Raft<T> {
         }
         let old_is_delegate = self.is_delegate;
         self.is_delegate = !m.get_bcast_targets().is_empty();
-        let accepted = self.handle_append_entries(&m, &mut to_send);
+        self.handle_append_entries(&m, &mut to_send);
+        let accepted = !to_send.reject;
         self.send(to_send);
         if accepted {
             let mut prs = self.take_prs();
@@ -1909,7 +1910,7 @@ impl<T: Storage> Raft<T> {
                     if !old_is_delegate && self.is_delegate {
                         // Make sure the delegate can send a message to the target
                         pr.become_probe();
-                        pr.optimistic_update(self.raft_log.last_index() - 1);
+                        pr.optimistic_update(self.raft_log.last_index());
                     }
                     self.send_append(target, pr);
                 }
@@ -1918,8 +1919,7 @@ impl<T: Storage> Raft<T> {
         }
     }
 
-    // Return false when rejecting the append message.
-    fn handle_append_entries(&mut self, m: &Message, to_send: &mut Message) -> bool {
+    fn handle_append_entries(&mut self, m: &Message, to_send: &mut Message) {
         debug_assert!(m.log_term != 0, "{:?} log term can't be 0", m);
         if let Some((_, last_idx)) = self
             .raft_log
@@ -1932,7 +1932,6 @@ impl<T: Storage> Raft<T> {
                 to_delegate.to = m.delegate;
                 self.send(to_delegate);
             }
-            true
         } else {
             debug!(
                 self.logger,
@@ -1951,7 +1950,6 @@ impl<T: Storage> Raft<T> {
             to_send.index = m.index;
             to_send.reject = true;
             to_send.reject_hint = self.raft_log.last_index();
-            false
         }
     }
 
