@@ -55,11 +55,6 @@ impl Configuration {
         }
     }
 
-    /// Take learners
-    pub fn take_learners(&mut self) -> HashSet<u64> {
-        std::mem::replace(&mut self.learners, HashSet::default())
-    }
-
     /// Create a new `ConfState` from the configuration itself.
     pub fn to_conf_state(&self) -> ConfState {
         let mut state = ConfState::default();
