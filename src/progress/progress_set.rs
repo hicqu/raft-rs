@@ -32,13 +32,14 @@ pub fn majority(total: usize) -> usize {
 /// A Raft internal representation of a Configuration.
 ///
 /// This is corollary to a ConfState, but optimized for `contains` calls.
-#[derive(Clone, Debug, Default, PartialEq, Getters)]
+#[derive(Clone, Debug, Default, PartialEq, Getters, Setters)]
 pub struct Configuration {
     /// The voter set.
     #[get = "pub"]
     voters: HashSet<u64>,
     /// The learner set.
     #[get = "pub"]
+    #[set = "pub"]
     learners: HashSet<u64>,
 }
 
@@ -52,6 +53,11 @@ impl Configuration {
             voters: voters.into_iter().collect(),
             learners: learners.into_iter().collect(),
         }
+    }
+
+    /// Take learners
+    pub fn take_learners(&mut self) -> HashSet<u64> {
+        std::mem::replace(&mut self.learners, HashSet::default())
     }
 
     /// Create a new `ConfState` from the configuration itself.
@@ -426,19 +432,22 @@ impl ProgressSet {
         F: FnMut(u64, bool),
     {
         let mut active = HashSet::default();
-        for (&id, pr) in self.voters_mut() {
+        let learners = self.configuration.take_learners();
+        for (&id, pr) in self.iter_mut() {
             if id == perspective_of {
                 active.insert(id);
                 continue;
             }
             f(id, pr.recent_active);
+            if learners.contains(&id) {
+                continue;
+            }
             if pr.recent_active {
                 active.insert(id);
             }
-        }
-        for pr in self.progress.values_mut() {
             pr.recent_active = false;
         }
+        self.configuration.set_learners(learners);
         self.configuration.has_quorum(&active)
     }
 
