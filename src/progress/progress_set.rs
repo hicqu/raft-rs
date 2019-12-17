@@ -432,22 +432,26 @@ impl ProgressSet {
         F: FnMut(u64, bool),
     {
         let mut active = HashSet::default();
-        let learners = self.configuration.take_learners();
-        for (&id, pr) in self.iter_mut() {
-            if id == perspective_of {
-                active.insert(id);
+        for id in &self.configuration.voters {
+            if *id == perspective_of {
+                active.insert(*id);
                 continue;
             }
-            f(id, pr.recent_active);
-            if learners.contains(&id) {
-                continue;
-            }
+            let pr = self.progress.get_mut(id).unwrap();
+            f(*id, pr.recent_active);
             if pr.recent_active {
-                active.insert(id);
+                active.insert(*id);
             }
             pr.recent_active = false;
         }
-        self.configuration.set_learners(learners);
+        for id in &self.configuration.learners {
+            if *id == perspective_of {
+                continue;
+            }
+            let pr = self.progress.get_mut(id).unwrap();
+            f(*id, pr.recent_active);
+            pr.recent_active = false;
+        }
         self.configuration.has_quorum(&active)
     }
 
