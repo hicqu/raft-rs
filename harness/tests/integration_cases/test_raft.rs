@@ -2442,6 +2442,31 @@ fn test_read_only_for_new_leader() {
 }
 
 #[test]
+fn test_read_index_reject() {
+    let l = default_logger();
+    let mut nt = Network::new(vec![None, None, None], &l);
+    nt.peers
+        .get_mut(&1)
+        .unwrap()
+        .step(new_message(1, 1, MessageType::MsgHup, 0))
+        .unwrap();
+
+    // Only vote messages are allowed, drop all other messages.
+    for _ in 0..2 {
+        let msgs = nt.read_messages();
+        nt.dispatch(msgs).unwrap();
+    }
+    drop(nt.read_messages());
+
+    nt.dispatch(vec![new_message(2, 1, MessageType::MsgReadIndex, 0)])
+        .unwrap();
+    let msgs = nt.read_messages();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].get_msg_type(), MessageType::MsgReadIndexResp);
+    assert_eq!(msgs[0].get_index(), 0);
+}
+
+#[test]
 fn test_leader_append_response() {
     let l = default_logger();
     // Initial progress: match = 0, next = 4 on followers.

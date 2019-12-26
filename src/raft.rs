@@ -1533,6 +1533,12 @@ impl<T: Storage> Raft<T> {
                 if self.raft_log.term(self.raft_log.committed).unwrap_or(0) != self.term {
                     // Reject read only request when this leader has not committed any log entry
                     // in its term.
+                    let mut to_send = Message::default();
+                    to_send.set_msg_type(MessageType::MsgReadIndexResp);
+                    to_send.to = m.from;
+                    to_send.index = INVALID_INDEX;
+                    to_send.set_entries(m.take_entries());
+                    self.send(to_send);
                     return Ok(());
                 }
 
