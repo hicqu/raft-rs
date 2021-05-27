@@ -231,3 +231,59 @@ fn test_request_snapshot() {
     assert_eq!(sm.prs().get(2).unwrap().next_idx, 12);
     assert!(sm.prs().get(2).unwrap().is_paused());
 }
+
+#[test]
+fn test_append_on_unstable_snapshot() {
+    let l = default_logger();
+    let create_peer = |id: u64| {
+        let s = new_storage();
+        let snap = new_snapshot(1, 1, vec![1, 2, 3]);
+        s.wl().apply_snapshot(snap).unwrap();
+        new_test_raft(id, vec![1, 2, 3], 10, 1, s, &l)
+    };
+
+    let mut n2 = create_peer(2);
+    n2.become_follower(1, 1);
+
+    // Step a MsgAppend.
+    let mut m = new_message(1, 2, MessageType::MsgAppend, 0);
+    m.term = 1;
+    m.index = 1;
+    m.log_term = 1;
+    let mut e = Entry::default();
+    e.index = 2;
+    e.term = 1;
+    m.mut_entries().push(e);
+    n2.step(m).expect("");
+
+    // Step a MsgSnapshot.
+    let mut m = new_message(1, 2, MessageType::MsgSnapshot, 0);
+    m.term = 1;
+    m.index = 10;
+    m.commit = 10;
+    {
+        let meta = m.mut_snapshot().mut_metadata();
+        meta.index = 10;
+        meta.term = 1;
+        meta.mut_conf_state().mut_voters().push(2);
+    }
+    n2.step(m).expect("");
+
+    // Step a MsgAppend again.
+    let mut m = new_message(1, 2, MessageType::MsgAppend, 0);
+    m.term = 2;
+    m.index = 10;
+    m.log_term = 1;
+    let mut e = Entry::default();
+    e.index = 11;
+    e.term = 2;
+    m.mut_entries().push(e);
+    n2.step(m).expect("");
+
+    // It's expected that both of `snapshot` and `entries` are available
+    // when generating a `Ready`.
+    let snap = n2.raft_log.unstable_snapshot();
+    let entries = n2.raft_log.unstable_entries().to_vec();
+    assert!(snap.is_some());
+    assert_eq!(entries.first().unwrap().index, 11);
+}

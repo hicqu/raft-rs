@@ -15,6 +15,11 @@ edition = "2018"
 [workspace]
 members = ["proto", "harness", "datadriven"]
 
+[profile.dev]
+incremental = true
+[profile.release]
+incremental = true
+
 [features]
 default = ["protobuf-codec", "default-logger"]
 # Enable failpoints
