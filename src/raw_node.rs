@@ -242,6 +242,7 @@ struct ReadyRecord {
 pub struct LightReady {
     commit_index: Option<u64>,
     committed_entries: Vec<Entry>,
+    committed_entries_is_omit: bool,
     messages: Vec<Message>,
 }
 
@@ -257,8 +258,13 @@ impl LightReady {
     /// CommittedEntries specifies entries to be committed to a
     /// store/state-machine. These have previously been committed to stable
     /// store.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `LightReady` is generated with `no_committed_entries_in_ready`.
     #[inline]
     pub fn committed_entries(&self) -> &Vec<Entry> {
+        assert!(!self.committed_entries_is_omit);
         &self.committed_entries
     }
 
@@ -413,17 +419,23 @@ impl<T: Storage> RawNode<T> {
     /// Generates a LightReady that has the committed entries and messages but no commit index.
     fn gen_light_ready(&mut self) -> LightReady {
         let mut rd = LightReady::default();
-        let max_size = Some(self.raft.max_committed_size_per_ready);
         let raft = &mut self.raft;
-        rd.committed_entries = raft
-            .raft_log
-            .next_entries_since(self.commit_since_index, max_size)
-            .unwrap_or_default();
-        // Update raft uncommitted entries size
-        raft.reduce_uncommitted_size(&rd.committed_entries);
-        if let Some(e) = rd.committed_entries.last() {
-            assert!(self.commit_since_index < e.get_index());
-            self.commit_since_index = e.get_index();
+        if !raft.no_committed_entries_in_ready {
+            let max_size = Some(raft.max_committed_size_per_ready);
+            rd.committed_entries = raft
+                .raft_log
+                .next_entries_since(self.commit_since_index, max_size)
+                .unwrap_or_default();
+            // Update raft uncommitted entries size
+            // TODO(qupeng): fix the logic with a better solution.
+            raft.reduce_uncommitted_size(&rd.committed_entries);
+
+            if let Some(e) = rd.committed_entries.last() {
+                assert!(self.commit_since_index < e.get_index());
+                self.commit_since_index = e.get_index();
+            }
+        } else {
+            rd.committed_entries_is_omit = true;
         }
 
         if !raft.msgs.is_empty() {
@@ -673,6 +685,25 @@ impl<T: Storage> RawNode<T> {
     #[inline]
     pub fn advance_apply_to(&mut self, applied: u64) {
         self.commit_apply(applied);
+    }
+
+    /// Get the index which can be used to fetch more committed entries.
+    ///
+    /// Generally committed entries are fetched in `RawNode::Ready`. However sometimes
+    /// we don't want to do the fetch when constructing `Ready`s, in which case we can
+    /// call `commit_since_index` to get an index, and then fetch committed entries
+    /// manually with `Storage::entries(index, ...)`.
+    pub fn commit_since_index(&self) -> Option<u64> {
+        if self.commit_since_index < self.raft.raft_log.applied {
+            return Some(self.commit_since_index);
+        }
+        None
+    }
+
+    /// Advance the index which can be used to fetch more committed entries.
+    pub fn advance_commit_since_index(&mut self, next: u64) {
+        assert!(next > self.commit_since_index);
+        self.commit_since_index = next;
     }
 
     /// Grabs the snapshot from the raft if available.

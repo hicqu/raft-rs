@@ -260,6 +260,9 @@ pub struct RaftCore<T: Storage> {
 
     /// Max size per committed entries in a `Read`.
     pub(crate) max_committed_size_per_ready: u64,
+
+    /// Don't fetch committed entries in Ready if `no_committed_entries_in_ready` is true.
+    pub(crate) no_committed_entries_in_ready: bool,
 }
 
 /// A struct that represents the raft consensus itself. Stores details concerning the current
@@ -365,6 +368,7 @@ impl<T: Storage> Raft<T> {
                     last_log_tail_index: 0,
                 },
                 max_committed_size_per_ready: c.max_committed_size_per_ready,
+                no_committed_entries_in_ready: c.no_committed_entries_in_ready,
             },
         };
         confchange::restore(&mut r.prs, r.r.raft_log.last_index(), conf_state)?;
@@ -594,6 +598,11 @@ impl<T: Storage> Raft<T> {
     /// Set `max_committed_size_per_ready` to `size`.
     pub fn set_max_committed_size_per_ready(&mut self, size: u64) {
         self.max_committed_size_per_ready = size;
+    }
+
+    /// Set `no_committed_entries_in_ready`.
+    pub fn set_no_committed_entries_in_ready(&mut self, no: bool) {
+        self.no_committed_entries_in_ready = no;
     }
 }
 

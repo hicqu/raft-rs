@@ -98,6 +98,9 @@ pub struct Config {
 
     /// Max size for committed entries in a `Ready`.
     pub max_committed_size_per_ready: u64,
+
+    /// Set to `true` to fetch nothing into `committed_entries` when constructing `Ready`.
+    pub no_committed_entries_in_ready: bool,
 }
 
 impl Default for Config {
@@ -120,6 +123,7 @@ impl Default for Config {
             priority: 0,
             max_uncommitted_size: NO_LIMIT,
             max_committed_size_per_ready: NO_LIMIT,
+            no_committed_entries_in_ready: false,
         }
     }
 }
